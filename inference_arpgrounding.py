@@ -1,7 +1,6 @@
 import argparse
 from arp_backends.dinotxt import load_dinotxt, interpret_dinotxt
 
-
 import torch
 from tqdm import tqdm
 
@@ -40,6 +39,7 @@ if __name__ == "__main__":
     parser.add_argument("-blip2_path", "--blip2_path", type=str, default="", help="blip2 folder path", required=False)
     parser.add_argument("-val_path", "--val_path", default="../../wsg/MultiGrounding/data/visual_genome", help="data set path", required=False)
     parser.add_argument("-split", "--split", default="attribute", help="composition type: attribute/relation/priority", required=True)
+    parser.add_argument('-dinotxt_eval', action='store_true')
     args = vars(parser.parse_args())
 
     # Load dataset
