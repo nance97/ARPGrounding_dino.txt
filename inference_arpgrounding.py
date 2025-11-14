@@ -1,4 +1,6 @@
 import argparse
+from arp_backends.dinotxt import load_dinotxt, interpret_dinotxt
+
 
 import torch
 from tqdm import tqdm
@@ -63,12 +65,14 @@ if __name__ == "__main__":
             checkpoint = torch.load(args["albef_path"], map_location="cpu")
             state_dict = checkpoint
             albef_model.load_state_dict(state_dict, strict=False)
-    elif args["blip2_eval"] or args["path_ae"]:
+    elif args["blip2_eval"] or args.get("path_ae"):
         blip_model, _, _ = load_model_and_preprocess("blip2_image_text_matching", "coco", device=device, is_eval=True)
         if args["blip2_path"]:
             checkpoint = torch.load(args["blip2_path"], map_location="cpu")
             state_dict = checkpoint["state_dict"]
             blip_model.load_state_dict(state_dict)
+    elif args["dinotxt_eval"]:
+        dinotxt_model, _ = load_dinotxt(device=device, isize=int(args["Isize"]))
 
     # Inference
     pbar = tqdm(dl)
@@ -135,6 +139,11 @@ if __name__ == "__main__":
                 assert real_imgs.size()[2:] == (364, 364)
                 heatmaps = interpret_blip(real_imgs, texts, blip_model, device=device).detach()
                 neg_heatmaps = interpret_blip(real_imgs, neg_texts, blip_model, device=device).detach()
+
+            elif args["dinotxt_eval"]:
+                assert real_imgs.size()[2:] == (int(args["Isize"]), int(args["Isize"]))
+                heatmaps = interpret_dinotxt(real_imgs, texts, dinotxt_model, isize=int(args["Isize"]), device=device)
+                neg_heatmaps = interpret_dinotxt(real_imgs, neg_texts, dinotxt_model, isize=int(args["Isize"]), device=device)
 
             for j in range(0, len(heatmaps)):
                 pos_regions = [
