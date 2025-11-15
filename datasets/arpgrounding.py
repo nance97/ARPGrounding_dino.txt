@@ -35,7 +35,6 @@ class ImageLoader(torch.utils.data.Dataset):
         img_path = os.path.join(self.img_folder, item + ".jpg")
 
         if index == 0:
-            print("DEBUG root:", self.root)
             print("DEBUG img_folder:", self.img_folder)
             print("DEBUG img_path:", img_path)
 
