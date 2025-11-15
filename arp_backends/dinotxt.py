@@ -11,7 +11,7 @@ class DinoTxtWrapper(torch.nn.Module):
         super().__init__()
         torch.hub.set_dir(os.path.expanduser("~/.cache/torch/hub"))
         m = torch.hub.load("facebookresearch/dinov2", hub_variant, trust_repo=True, force_reload=False).eval()
-        m = m.to(DEVICE).half() if (DEVICE == "cuda" and use_half) else m.to(DEVICE)
+        m = m.to(DEVICE)
         self.model = m
         from dinov2.hub.dinotxt import get_tokenizer
         self.tokenizer = get_tokenizer()
