@@ -1,41 +1,52 @@
-import os, torch
+import os, math
+import torch
 import torch.nn.functional as F
 from torchvision import transforms
 from PIL import Image
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+
 class DinoTxtWrapper(torch.nn.Module):
     """
-    EXACT replication of the DINO patch/text encoding path.
-    Uses forward_features + x_norm_patchtokens + patch_embed.grid_size.
+    Strictly reproduces the official dinotxt notebook behavior:
+    - uses get_visual_class_and_patch_tokens
+    - uses local half of text embedding (un-normalized)
+    - normalization happens ONLY once in the heatmap function
     """
     def __init__(self, hub_variant="dinov2_vitl14_reg4_dinotxt_tet1280d20h24l",
                  isize=518):
         super().__init__()
         torch.hub.set_dir(os.path.expanduser("~/.cache/torch/hub"))
 
-        self.model = torch.hub.load(
+        m = torch.hub.load(
             "facebookresearch/dinov2",
             hub_variant,
             trust_repo=True,
-            force_reload=False
+            force_reload=False,
         ).eval().to(DEVICE)
+        self.model = m
 
+        # tokenizer from dinotxt implementation
         from dinov2.hub.dinotxt import get_tokenizer
         self.tokenizer = get_tokenizer()
 
+        # image pipeline matches Meta notebook exactly
         self.preprocess = transforms.Compose([
             transforms.Resize(isize, antialias=True),
             transforms.CenterCrop(isize),
             transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485,0.456,0.406),
-                                 std=(0.229,0.224,0.225)),
+            transforms.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
         ])
 
-    # ---- TEXT ENCODING ----
+        self.isize = isize
+
     def _tok(self, texts):
-        ids = [torch.tensor(self.tokenizer.encode(t), dtype=torch.long) for t in texts]
+        ids = [torch.tensor(self.tokenizer.encode(t), dtype=torch.long)
+               for t in texts]
         L = max(x.numel() for x in ids)
         batch = torch.zeros(len(ids), L, dtype=torch.long)
         for i, seq in enumerate(ids):
@@ -44,69 +55,64 @@ class DinoTxtWrapper(torch.nn.Module):
 
     @torch.no_grad()
     def encode_text_local(self, texts):
-        """Strict fidelity: same local-half split and normalization."""
-        t2 = self.model.encode_text(self._tok(texts))  # [B, 2D]
-        D = t2.shape[-1] // 2
-        t_local = t2[:, D:]     # local half
-        return torch.nn.functional.normalize(t_local, dim=-1)
+        """
+        EXACT DINOTXT BEHAVIOR:
+        encode_text -> take second half -> DO NOT normalize here.
+        """
+        T2 = self.model.encode_text(self._tok(texts))  # [B, 2D]
+        D = T2.shape[-1] // 2
+        return T2[:, D:]  # [B,D], unnormalized
 
-    # ---- IMAGE PATCH FEATURES ----
     @torch.no_grad()
-    def encode_patch_features(self, images):
+    def encode_patch_tokens(self, images):
         """
-        Strict fidelity to DINO TXT:
-            - Use forward_features()
-            - Use x_norm_patchtokens
-            - Use patch_embed.grid_size to reshape
+        EXACT DINOTXT BEHAVIOR:
+        get_visual_class_and_patch_tokens -> return patch tokens only
+        (unnormalized at this point; notebook normalizes later)
         """
-        if isinstance(images, list) and isinstance(images[0], Image.Image):
-            x = torch.stack([self.preprocess(im.convert("RGB")) for im in images]).to(DEVICE)
+        if isinstance(images, list) and images and isinstance(images[0], Image.Image):
+            x = torch.stack([self.preprocess(im.convert("RGB"))
+                             for im in images]).to(DEVICE)
         else:
             x = images.to(DEVICE)
 
-        # EXACT Meta DINO forward
-        out = self.model.forward_features(x)
-
-        feats = out["x_norm_patchtokens"]  # [B, HW, D]
-
-        # correct feature resolution (H_feat, W_feat)
-        H_feat, W_feat = self.model.patch_embed.grid_size
-
-        B, HW, D = feats.shape
-        assert HW == H_feat * W_feat, "Patch count mismatch — strict fidelity requires exact reshape."
-
-        # reshape to [B, D, Hf, Wf]
-        fmap = feats.view(B, H_feat, W_feat, D).permute(0, 3, 1, 2)
-        fmap = torch.nn.functional.normalize(fmap, dim=1)
-
-        return fmap  # [B, D, Hf, Wf]
+        _cls, patches = self.model.get_visual_class_and_patch_tokens(x)
+        return patches  # [B,P,D], unnormalized
     
 def load_dinotxt(device="cuda", isize=518):
     m = DinoTxtWrapper(isize=isize)
     return m, m.preprocess
 
 @torch.no_grad()
-def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
-                             isize=518, device="cuda"):
+def interpret_dinotxt_probe(images, texts, model: DinoTxtWrapper,
+                            isize=518, device="cuda"):
     """
-    EXACT DINO TXT logic:
-        1. extract feature grid via forward_features
-        2. interpolate features to full resolution
-        3. cosine similarity per pixel
-        4. min-max normalize
+    Strict dinotxt.ipynb pipeline:
+    - patch tokens from get_visual_...()
+    - reshape to grid
+    - upsample *features*
+    - L2 normalize BOTH image and text features HERE (once only)
+    - cosine similarity via einsum
+    - normalize to [0,1]
     """
+    images = images.to(device)
 
-    fmap = model.encode_patch_features(images)
+    patches = model.encode_patch_tokens(images)
+    B, P, D = patches.shape
 
-    fmap_up = torch.nn.functional.interpolate(
-        fmap, size=(isize, isize), mode="bicubic", align_corners=False
-    )  # [B, D, H, W]
+    H = W = int(P ** 0.5)
+    x = patches.movedim(2, 1).unflatten(2, (H, W)).float()  # [B,D,H,W]
 
-    t_local = model.encode_text_local(texts)  # [B, D]
-    sim = torch.einsum("bdhw,bd->bhw", fmap_up, t_local).unsqueeze(1)
+    x = F.interpolate(x, size=(isize, isize), mode="bicubic", align_corners=False)
+    x = F.normalize(x, p=2, dim=1)  # [B,D,H,W]
 
-    sim_min = sim.amin(dim=(2,3), keepdim=True)
-    sim_max = sim.amax(dim=(2,3), keepdim=True)
-    sim = (sim - sim_min) / (sim_max - sim_min + 1e-6)
+    t = model.encode_text_local(texts)   # [B,D]
+    t = F.normalize(t, p=2, dim=1)       # normalized here only
 
-    return sim  # [B,1,H,W]
+    sims = torch.einsum("bdhw,bd->bhw", x, t).unsqueeze(1)
+
+    sims_min = sims.amin(dim=(2, 3), keepdim=True)
+    sims_max = sims.amax(dim=(2, 3), keepdim=True)
+    sims = (sims - sims_min) / (sims_max - sims_min + 1e-6)
+
+    return sims
