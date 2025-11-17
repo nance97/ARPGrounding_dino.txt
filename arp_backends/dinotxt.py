@@ -80,6 +80,10 @@ class DinoTxtWrapper(torch.nn.Module):
         fmap = torch.nn.functional.normalize(fmap, dim=1)
 
         return fmap  # [B, D, Hf, Wf]
+    
+def load_dinotxt(device="cuda", isize=518):
+    m = DinoTxtWrapper(isize=isize)
+    return m, m.preprocess
 
 @torch.no_grad()
 def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
