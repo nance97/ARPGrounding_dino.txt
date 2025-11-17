@@ -84,7 +84,7 @@ def load_dinotxt(device="cuda", isize=518):
     return m, m.preprocess
 
 @torch.no_grad()
-def interpret_dinotxt_probe(images, texts, model: DinoTxtWrapper,
+def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
                             isize=518, device="cuda"):
     """
     Strict dinotxt.ipynb pipeline:
