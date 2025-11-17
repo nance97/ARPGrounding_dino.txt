@@ -53,20 +53,18 @@ def load_dinotxt(device="cuda", isize=518):
 
 @torch.no_grad()
 def interpret_dinotxt(images, texts, model, isize=518, device="cuda"):
-    """
-    images: [B,3,H,W] tensor on device
-    texts:  list[str]
-    returns heatmaps [B,1,H,W] in [0,1], like interpret_clip
-    """
-    patches = model.encode_patches(images)          # [B,P,D]
-    text_emb = model.encode_text_local(texts)       # [B,D]
+
+    patches = model.encode_patches(images)  # [B,P,D], unit-normalized
     B, P, D = patches.shape
     g = int(math.sqrt(P))
-    patches = patches[:, : g*g, :]                  # [B,g*g,D]
-    patches = patches.view(B, g*g, D)
-    # cosine sim per patch: [B,g*g]
-    sims = torch.einsum("bpd,bd->bp", patches, text_emb)
-    sims = sims.view(B, 1, g, g)
-    sims = (sims - sims.amin(dim=(2,3), keepdim=True)) / (sims.amax(dim=(2,3), keepdim=True) - sims.amin(dim=(2,3), keepdim=True) + 1e-6)
-    sims = F.interpolate(sims, size=(isize, isize), mode="bilinear", align_corners=False)
-    return sims  # [B,1,H,W] in [0,1]
+
+    x = patches[:, :g*g, :].view(B, g, g, D).permute(0, 3, 1, 2)
+    x = F.interpolate(x, size=(isize, isize), mode="bicubic", align_corners=False)
+    y = model.encode_text_local(texts)  # [B,D]
+    sims = torch.einsum("bdhw,bd->bhw", x, y).unsqueeze(1)
+
+    sims_min = sims.amin(dim=(2,3), keepdim=True)
+    sims_max = sims.amax(dim=(2,3), keepdim=True)
+    sims = (sims - sims_min) / (sims_max - sims_min + 1e-6)
+
+    return sims
