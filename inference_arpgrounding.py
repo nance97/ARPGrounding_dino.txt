@@ -50,6 +50,7 @@ if __name__ == "__main__":
 
     # Load model
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    Isize = int(args["Isize"])
 
     if args["clip_eval"]:
         clip_model, _ = clip.load(args["clip_path"], device=device, jit=False)
