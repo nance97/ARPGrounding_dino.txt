@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 from datasets.arpgrounding import get_dataset
 from inference_grounding import interpret_albef, interpret_blip, interpret_clip, meter_make_batch, interpret_meter
+from utils_grounding import resize_then_center_crop_bbox
 
 try:
     import CLIP.clip as clip
@@ -72,7 +73,8 @@ if __name__ == "__main__":
             state_dict = checkpoint["state_dict"]
             blip_model.load_state_dict(state_dict)
     elif args["dinotxt_eval"]:
-        dinotxt_model, _ = load_dinotxt(device=device, isize=int(args["Isize"]))
+        dinotxt_model, dinotxt_preprocess = load_dinotxt(device=device, isize=int(args["Isize"]))
+        ds.transform = dinotxt_preprocess
 
     # Inference
     pbar = tqdm(dl)
@@ -83,29 +85,42 @@ if __name__ == "__main__":
         real_imgs, meta, size, _ = inputs
         if len(list(meta.keys())) == 0:
             continue
+
         real_imgs = real_imgs.cuda()
-        real_imgs = real_imgs.repeat(len(meta), 1, 1, 1)
-        size = [int(size[0]), int(size[1])]
+        size = [int(size[0]), int(size[1])]  # original (H0, W0)
+
         texts, neg_texts, pos_bboxes, neg_bboxes = [], [], [], []
         for item in list(meta.values()):
             texts.append(item["sentences"][0])
             neg_texts.append(item["neg_sentences"][0])
-            pos_bboxes.append(
-                [
-                    int(item["bbox"][0][0] / size[1] * real_imgs.size(3)),
-                    int(item["bbox"][0][1] / size[0] * real_imgs.size(2)),
-                    int(item["bbox"][0][2] / size[1] * real_imgs.size(3)),
-                    int(item["bbox"][0][3] / size[0] * real_imgs.size(2)),
-                ]
-            )
-            neg_bboxes.append(
-                [
-                    int(item["bbox"][1][0] / size[1] * real_imgs.size(3)),
-                    int(item["bbox"][1][1] / size[0] * real_imgs.size(2)),
-                    int(item["bbox"][1][2] / size[1] * real_imgs.size(3)),
-                    int(item["bbox"][1][3] / size[0] * real_imgs.size(2)),
-                ]
-            )
+
+            if args["dinotxt_eval"]:
+                # DINOtxt: follow Resize+CenterCrop geometry
+                pos_bboxes.append(
+                    resize_then_center_crop_bbox(item["bbox"][0], size, Isize)
+                )
+                neg_bboxes.append(
+                    resize_then_center_crop_bbox(item["bbox"][1], size, Isize)
+                )
+            else:
+                # Other models: keep the old linear scaling
+                pos_bboxes.append(
+                    [
+                        int(item["bbox"][0][0] / size[1] * real_imgs.size(3)),
+                        int(item["bbox"][0][1] / size[0] * real_imgs.size(2)),
+                        int(item["bbox"][0][2] / size[1] * real_imgs.size(3)),
+                        int(item["bbox"][0][3] / size[0] * real_imgs.size(2)),
+                    ]
+                )
+                neg_bboxes.append(
+                    [
+                        int(item["bbox"][1][0] / size[1] * real_imgs.size(3)),
+                        int(item["bbox"][1][1] / size[0] * real_imgs.size(2)),
+                        int(item["bbox"][1][2] / size[1] * real_imgs.size(3)),
+                        int(item["bbox"][1][3] / size[0] * real_imgs.size(2)),
+                    ]
+                )
+
         # for pos_bbox, neg_bbox in zip(pos_bboxes, neg_bboxes):
         #     pos_area += (pos_bbox[2] - pos_bbox[0]) * (pos_bbox[3] - pos_bbox[1])
         #     neg_area += (neg_bbox[2] - neg_bbox[0]) * (neg_bbox[3] - neg_bbox[1])
@@ -142,8 +157,14 @@ if __name__ == "__main__":
 
             elif args["dinotxt_eval"]:
                 assert real_imgs.size()[2:] == (int(args["Isize"]), int(args["Isize"]))
-                heatmaps = interpret_dinotxt(real_imgs, texts, dinotxt_model, isize=int(args["Isize"]), device=device)
-                neg_heatmaps = interpret_dinotxt(real_imgs, neg_texts, dinotxt_model, isize=int(args["Isize"]), device=device)
+                heatmaps = interpret_dinotxt(
+                real_imgs, texts, dinotxt_model,
+                isize=int(args["Isize"]), device=device
+            )
+            neg_heatmaps = interpret_dinotxt(
+                real_imgs, neg_texts, dinotxt_model,
+                isize=int(args["Isize"]), device=device
+            )
 
             for j in range(0, len(heatmaps)):
                 pos_regions = [

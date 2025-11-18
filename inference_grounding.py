@@ -298,6 +298,57 @@ def main(args=None):
             blip_model.load_state_dict(state_dict)
         inference_blip(ds, blip_model, args)
 
+def resize_then_center_crop_bbox(bbox, orig_size, out_size):
+    """
+    bbox: [x1, y1, x2, y2] in original image coords
+    orig_size: (H0, W0)   (from `size`)
+    out_size: int (Isize) final square side after Resize+CenterCrop
+    """
+    H0, W0 = orig_size
+    s = float(out_size)
+    x1, y1, x2, y2 = map(float, bbox)
+
+    # Resize with aspect ratio preserved (short side -> s)
+    if H0 <= W0:
+        # height is short side
+        scale = s / H0
+        H1 = s
+        W1 = W0 * scale
+        crop_x0 = (W1 - s) / 2.0  # horizontal crop offset
+        crop_y0 = 0.0
+    else:
+        # width is short side
+        scale = s / W0
+        W1 = s
+        H1 = H0 * scale
+        crop_x0 = 0.0
+        crop_y0 = (H1 - s) / 2.0  # vertical crop offset
+
+    # Resize bbox
+    x1_r = x1 * scale
+    x2_r = x2 * scale
+    y1_r = y1 * scale
+    y2_r = y2 * scale
+
+    # Center crop bbox
+    x1_c = x1_r - crop_x0
+    x2_c = x2_r - crop_x0
+    y1_c = y1_r - crop_y0
+    y2_c = y2_r - crop_y0
+
+    # Clamp into [0, s]
+    x1_c = max(0.0, min(s, x1_c))
+    x2_c = max(0.0, min(s, x2_c))
+    y1_c = max(0.0, min(s, y1_c))
+    y2_c = max(0.0, min(s, y2_c))
+
+    return [
+        int(round(x1_c)),
+        int(round(y1_c)),
+        int(round(x2_c)),
+        int(round(y2_c)),
+    ]
+
 
 if __name__ == "__main__":
     import argparse
