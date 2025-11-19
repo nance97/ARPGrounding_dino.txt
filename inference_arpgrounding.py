@@ -9,9 +9,12 @@ from inference_grounding import interpret_albef, interpret_blip, interpret_clip,
 from utils_grounding import resize_then_center_crop_bbox
 
 try:
-    import CLIP.clip as clip
+    import CLIP.clip as clip  # some environments
 except Exception:
-    pass
+    try:
+        import clip  as clip   # openai-clip / official CLIP
+    except Exception:
+        clip = None
 
 try:
     from lavis.models import load_model_and_preprocess
