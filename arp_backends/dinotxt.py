@@ -102,8 +102,9 @@ def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
     H = W = int(P ** 0.5)
     x = patches.movedim(2, 1).unflatten(2, (H, W)).float()  # [1, D, H, W]
 
-    x = F.interpolate(x, size=(isize, isize),
-                      mode="bicubic", align_corners=False)
+    B, _, H_prep, W_prep = images.shape   # Dino-preprocessed image shape
+    x = F.interpolate(x, size=(H_prep, W_prep), mode="bicubic")
+
     x = F.normalize(x, p=2, dim=1)  # [1, D, H, W]
 
     # Texts: [T, D]
