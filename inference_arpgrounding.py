@@ -75,7 +75,7 @@ if __name__ == "__main__":
             blip_model.load_state_dict(state_dict)
     elif args["dinotxt_eval"]:
         dinotxt_model, dinotxt_preprocess = load_dinotxt(device=device, isize=int(args["Isize"]))
-        ds.transform = dinotxt_preprocess
+        # ds.transform = dinotxt_preprocess
 
     # Inference
     pbar = tqdm(dl)
