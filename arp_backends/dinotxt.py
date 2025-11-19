@@ -1,155 +1,104 @@
+# arp_backends/dinotxt.py
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms
-from PIL import Image
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+from dinov2.hub.dinotxt import (
+    dinov2_vitl14_reg4_dinotxt_tet1280d20h24l,
+    get_tokenizer,
+)
+from dinov2.data.transforms import make_classification_eval_transform
 
 
-class DinoTxtWrapper(nn.Module):
-    """
-    Exact reproduction of the official dinotxt.ipynb behavior.
-    - Loads the real DinoTXT model (not via torch.hub!).
-    - Uses get_visual_class_and_patch_tokens() from DinoTXT.
-    - Uses correct half of text embedding.
-    - Applies DinoTXT preprocessing exactly.
-    """
+class DinoTxtBackend:
+    def __init__(self, device: str = None):
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
 
-    def __init__(self, isize=518):
-        super().__init__()
-
-        # ----------------------------------------------------------
-        # 1. Load official DinoTXT model (correct way!)
-        # ----------------------------------------------------------
-        try:
-            from dinov2.hub.dinotxt import (
-                dinov2_vitl14_reg4_dinotxt_tet1280d20h24l,
-                get_tokenizer,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "dinov2 is not installed correctly. "
-                "Clone the official repo and pip install -e ."
-            ) from e
-
-        self.model = (
-            dinov2_vitl14_reg4_dinotxt_tet1280d20h24l(pretrained=True)
-            .eval()
-            .to(DEVICE)
-        )
+        # Load model + tokenizer exactly as in the notebook
+        self.model = dinov2_vitl14_reg4_dinotxt_tet1280d20h24l().to(device)
+        self.model.eval()
 
         self.tokenizer = get_tokenizer()
+        # Same eval transform as the notebook (if you want to use it on raw PIL imgs)
+        self.preprocess = make_classification_eval_transform()
 
-        # ----------------------------------------------------------
-        # 2. DinoTXT image preprocess (identical to notebook)
-        # ----------------------------------------------------------
-        self.preprocess = transforms.Compose([
-            transforms.Resize(isize, antialias=True),
-            transforms.CenterCrop(isize),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225)
-            )
-        ])
-        self.isize = isize
-
-    # --------------------------------------------------------------
-    # Tokenizer wrapper
-    # --------------------------------------------------------------
-    def _tok(self, texts):
-        ids = [torch.tensor(self.tokenizer.encode(t), dtype=torch.long)
-               for t in texts]
-        L = max(x.numel() for x in ids)
-        batch = torch.zeros(len(ids), L, dtype=torch.long)
-        for i, seq in enumerate(ids):
-            batch[i, :seq.numel()] = seq
-        return batch.to(DEVICE)
-
-    # --------------------------------------------------------------
-    # Text encoder (correct half)
-    # --------------------------------------------------------------
     @torch.no_grad()
-    def encode_text_local(self, texts):
+    @torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+    def _forward_tokens(self, images, texts):
         """
-        DinoTXT returns 2D text embedding; second half aligns with patch tokens.
-        """
-        t2 = self.model.encode_text(self._tok(texts))  # [B, 2D]
-        D = t2.shape[-1] // 2
-        return t2[:, D:]  # unnormalized
+        images: [B, 3, H, W] tensor on self.device
+        texts:  list[str], len = B
 
-    # --------------------------------------------------------------
-    # Patch tokens (the correct DinoTXT ones)
-    # --------------------------------------------------------------
+        returns:
+            image_patch_tokens: [B, P, D]
+            text_patch_features: [B, D]  (patch-aligned half of text embedding)
+        """
+        # Tokenize texts exactly like in the notebook
+        tokenized = self.tokenizer.tokenize(texts).to(self.device)  # [B, L]
+
+        # Visual tokens
+        image_class_tokens, image_patch_tokens = self.model.get_visual_class_and_patch_tokens(
+            images
+        )  # [B, D], [B, P, D]
+
+        # Text embedding, then take the patch-aligned half
+        text_features = self.model.encode_text(tokenized)  # [B, 2D]
+        B, twoD = text_features.shape
+        D = twoD // 2
+        text_patch_features = text_features[:, D:]  # [B, D]  (same as [:, 1024:] for ViT-L)
+
+        return image_patch_tokens, text_patch_features
+
     @torch.no_grad()
-    def encode_patch_tokens(self, images):
+    def get_heatmaps(self, images, texts):
         """
-        EXACT DinoTXT behavior:
-        get_visual_class_and_patch_tokens returns:
-          class_tokens : [B, D]
-          patch_tokens : [B, P, D]
+        images: [B, 3, H, W]  -- this is what ARPGrounding gives you
+        texts:  list[str] of length B
+
+        returns:
+            heatmaps: [B, 1, H, W]  (values ~ cosine similarity)
         """
-        if isinstance(images, list) and isinstance(images[0], Image.Image):
-            x = torch.stack([self.preprocess(im.convert("RGB")) for im in images]).to(DEVICE)
-        else:
-            x = images.to(DEVICE)
+        images = images.to(self.device)
 
-        cls_tok, patch_tok = self.model.get_visual_class_and_patch_tokens(x)
-        return patch_tok  # [B, P, D]
+        B, _, H, W = images.shape
 
-def load_dinotxt(device="cuda", isize=518):
-    m = DinoTxtWrapper(isize=isize)
-    return m, m.preprocess
+        # 1) get patch tokens + patch-aligned text features using official APIs
+        image_patch_tokens, text_patch_features = self._forward_tokens(images, texts)
+        # image_patch_tokens: [B, P, D]
+        # text_patch_features: [B, D]
 
-# ----------------------------------------------------------------------
-# FINAL: interpret function, exactly as notebook
-# ----------------------------------------------------------------------
-@torch.no_grad()
-def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
-                      upsample_size=None):
-    """
-    Compute DinoTXT heatmaps for *one* image and many texts.
+        B2, P, D = image_patch_tokens.shape
+        assert B2 == B, "Batch mismatch"
+        H_p = W_p = int(P ** 0.5)
+        assert H_p * W_p == P, f"Cannot reshape P={P} into square grid"
 
-    images: [1, 3, H, W]  (already preprocessed with model.preprocess)
-    texts : list[str] of length T
-    upsample_size: (H_out, W_out) – usually images.shape[2:]
-    returns: [T, 1, H_out, W_out]
-    """
-    # 1) image features
-    assert images.size(0) == 1, "interpret_dinotxt assumes batch_size=1 for images."
-    patches = model.encode_patch_tokens(images)   # [1, P, D]
-    _, P, D = patches.shape
+        # 2) [B, P, D] -> [B, D, H_p, W_p]
+        x = image_patch_tokens.movedim(2, 1).unflatten(2, (H_p, W_p)).float()  # [B, D, H_p, W_p]
 
-    H = W = int(P ** 0.5)
-    x = patches.movedim(2, 1).unflatten(2, (H, W)).float()  # [1, D, H, W]
+        # 3) upsample to image resolution
+        x = F.interpolate(x, size=(H, W), mode="bicubic", align_corners=False)  # [B, D, H, W]
 
-    # 2) upsample feature map
-    if upsample_size is None:
-        up_h, up_w = images.shape[2], images.shape[3]
-    else:
-        up_h, up_w = upsample_size
+        # 4) L2-normalize both sides
+        x = F.normalize(x, p=2, dim=1)                                # [B, D, H, W]
+        y = F.normalize(text_patch_features.float(), p=2, dim=1)      # [B, D]
 
-    x = F.interpolate(
-        x,
-        size=(up_h, up_w),
-        mode="bicubic",
-        align_corners=False,
-    )                                             # [1, D, H_out, W_out]
-    x = F.normalize(x, p=2, dim=1)               # L2 along D
+        # 5) cosine sim per pixel: [B, H, W]
+        # Note: in the notebook they do "bdhw,cd->bchw" to handle multiple texts.
+        # Here we have 1 text per image → use "bdhw,bd->bhw"
+        sims = torch.einsum("bdhw,bd->bhw", x, y)  # [B, H, W]
 
-    # 3) text features (T, D)
-    t = model.encode_text_local(texts)           # [T, D]
-    t = F.normalize(t, p=2, dim=1)
+        # 6) match ARPGrounding's expected shape [B, 1, H, W]
+        heatmaps = sims.unsqueeze(1)  # [B, 1, H, W]
 
-    # 4) cosine sim per text: [T, H_out, W_out]
-    #   "bdhw,td -> thw": one image, many texts
-    sims = torch.einsum("bdhw,td->thw", x, t)    # [T, H_out, W_out]
+        # Optional: ReLU + per-image max-normalization
+        heatmaps = torch.relu(heatmaps)
+        flat = heatmaps.view(B, -1)
+        max_vals = flat.max(dim=1, keepdim=True).values.clamp(min=1e-6)
+        heatmaps = heatmaps / max_vals.view(B, 1, 1, 1)
 
-    # 5) min–max normalize each heatmap independently
-    sims_min = sims.amin(dim=(1, 2), keepdim=True)
-    sims_max = sims.amax(dim=(1, 2), keepdim=True)
-    sims = (sims - sims_min) / (sims_max - sims_min + 1e-6)
+        return heatmaps  # [B, 1, H, W]
 
-    return sims.unsqueeze(1)                     # [T, 1, H_out, W_out]
 
+def load_dinotxt_backend(device: str = None):
+    return DinoTxtBackend(device=device)

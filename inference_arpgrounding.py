@@ -1,5 +1,5 @@
 import argparse
-from arp_backends.dinotxt import load_dinotxt, interpret_dinotxt
+from arp_backends.dinotxt import load_dinotxt_backend
 
 import torch
 from tqdm import tqdm
@@ -39,7 +39,11 @@ if __name__ == "__main__":
     parser.add_argument("-blip2_path", "--blip2_path", type=str, default="", help="blip2 folder path", required=False)
     parser.add_argument("-val_path", "--val_path", default="../../wsg/MultiGrounding/data/visual_genome", help="data set path", required=False)
     parser.add_argument("-split", "--split", default="attribute", help="composition type: attribute/relation/priority", required=True)
-    parser.add_argument('-dinotxt_eval', action='store_true')
+    parser.add_argument(
+        "-dinotxt_eval", "--dinotxt_eval",
+        default=False, action="store_true",
+        help="use dino.txt for ARPGrounding eval", required=False
+    )
     args = vars(parser.parse_args())
 
     # Load dataset
@@ -73,8 +77,7 @@ if __name__ == "__main__":
             state_dict = checkpoint["state_dict"]
             blip_model.load_state_dict(state_dict)
     elif args["dinotxt_eval"]:
-        dinotxt_model, dinotxt_preprocess = load_dinotxt(isize=518)
-        ds.transform = dinotxt_preprocess
+        dinotxt_backend = load_dinotxt_backend(device=device)
 
     # Inference
     pbar = tqdm(dl)
@@ -146,22 +149,9 @@ if __name__ == "__main__":
                 neg_heatmaps = interpret_blip(real_imgs, neg_texts, blip_model, device=device).detach()
 
             elif args["dinotxt_eval"]:
-                # real_imgs is already preprocessed by DinoTXT preprocess
-                H_prep, W_prep = real_imgs.shape[2], real_imgs.shape[3]
-
-                heatmaps = interpret_dinotxt(
-                    real_imgs,
-                    texts,
-                    dinotxt_model,
-                    upsample_size=(H_prep, W_prep)
-                )
-
-                neg_heatmaps = interpret_dinotxt(
-                    real_imgs,
-                    neg_texts,
-                    dinotxt_model,
-                    upsample_size=(H_prep, W_prep)
-                )
+                # images are already [B, 3, H, W] from the ARPG dataset
+                heatmaps = dinotxt_backend.get_heatmaps(real_imgs, texts).detach()
+                neg_heatmaps = dinotxt_backend.get_heatmaps(real_imgs, neg_texts).detach()
 
             for j in range(0, len(heatmaps)):
                 pos_regions = [
