@@ -109,26 +109,24 @@ def load_dinotxt(device="cuda", isize=518):
 def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
                       upsample_size=None):
     """
-    Compute DinoTXT heatmaps.
-    - images: [B,3,H,W] preprocessed by model.preprocess
-    - texts : list[str]
-    - upsample_size : (H,W) optional, recommended to use original image size
+    Compute DinoTXT heatmaps for *one* image and many texts.
+
+    images: [1, 3, H, W]  (already preprocessed with model.preprocess)
+    texts : list[str] of length T
+    upsample_size: (H_out, W_out) – usually images.shape[2:]
+    returns: [T, 1, H_out, W_out]
     """
+    # 1) image features
+    assert images.size(0) == 1, "interpret_dinotxt assumes batch_size=1 for images."
+    patches = model.encode_patch_tokens(images)   # [1, P, D]
+    _, P, D = patches.shape
 
-    device = next(model.parameters()).device
+    H = W = int(P ** 0.5)
+    x = patches.movedim(2, 1).unflatten(2, (H, W)).float()  # [1, D, H, W]
 
-    patches = model.encode_patch_tokens(images)   # [B,P,D]
-    B, P, D = patches.shape
-    
-    H = W = int(P**0.5)
-
-    # reshape tokens to 2D feature map
-    x = patches.movedim(2, 1).unflatten(2, (H, W)).float()  # [B,D,H,W]
-
-    # upsample to desired size
+    # 2) upsample feature map
     if upsample_size is None:
-        # default: return square HxH (not recommended)
-        up_h, up_w = H, H
+        up_h, up_w = images.shape[2], images.shape[3]
     else:
         up_h, up_w = upsample_size
 
@@ -137,21 +135,21 @@ def interpret_dinotxt(images, texts, model: DinoTxtWrapper,
         size=(up_h, up_w),
         mode="bicubic",
         align_corners=False,
-    )
+    )                                             # [1, D, H_out, W_out]
+    x = F.normalize(x, p=2, dim=1)               # L2 along D
 
-    # normalize patch features
-    x = F.normalize(x, p=2, dim=1)
-
-    # text embeddings
-    t = model.encode_text_local(texts)
+    # 3) text features (T, D)
+    t = model.encode_text_local(texts)           # [T, D]
     t = F.normalize(t, p=2, dim=1)
 
-    # cosine similarity
-    heatmaps = torch.einsum("bdhw,bd->bhw", x, t).unsqueeze(1)
+    # 4) cosine sim per text: [T, H_out, W_out]
+    #   "bdhw,td -> thw": one image, many texts
+    sims = torch.einsum("bdhw,td->thw", x, t)    # [T, H_out, W_out]
 
-    # normalize to [0,1]
-    hmin = heatmaps.amin(dim=(2, 3), keepdim=True)
-    hmax = heatmaps.amax(dim=(2, 3), keepdim=True)
-    heatmaps = (heatmaps - hmin) / (hmax - hmin + 1e-6)
+    # 5) min–max normalize each heatmap independently
+    sims_min = sims.amin(dim=(1, 2), keepdim=True)
+    sims_max = sims.amax(dim=(1, 2), keepdim=True)
+    sims = (sims - sims_min) / (sims_max - sims_min + 1e-6)
 
-    return heatmaps   # [B,1,H,W]
+    return sims.unsqueeze(1)                     # [T, 1, H_out, W_out]
+
