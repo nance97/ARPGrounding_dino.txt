@@ -74,11 +74,7 @@ def get_dataset(args):
     datadir = args["val_path"]
     split = args["split"]
 
-    # If using DinoTXT, DO NOT apply Flickr/COCO transforms
-    if args.get("dinotxt_eval", False):
-        ds_test = ImageLoader(datadir, split, transform=None)
-    else:
-        _, transform_test = get_flicker_transform(args)
-        ds_test = ImageLoader(datadir, split, transform=transform_test)
+    _, transform_test = get_flicker_transform(args)
+    ds_test = ImageLoader(datadir, split, transform=transform_test)
 
     return ds_test
