@@ -74,7 +74,7 @@ if __name__ == "__main__":
             state_dict = checkpoint["state_dict"]
             blip_model.load_state_dict(state_dict)
     elif args["dinotxt_eval"]:
-        dinotxt_model, dinotxt_preprocess = load_dinotxt(device=device, isize=int(args["Isize"]))
+        dinotxt_model, dinotxt_preprocess = load_dinotxt(isize=518)
         ds.transform = dinotxt_preprocess
 
     # Inference
@@ -157,15 +157,22 @@ if __name__ == "__main__":
                 neg_heatmaps = interpret_blip(real_imgs, neg_texts, blip_model, device=device).detach()
 
             elif args["dinotxt_eval"]:
-                assert real_imgs.size()[2:] == (int(args["Isize"]), int(args["Isize"]))
+                # real_imgs is already preprocessed by DinoTXT preprocess
+                H_prep, W_prep = real_imgs.shape[2], real_imgs.shape[3]
+
                 heatmaps = interpret_dinotxt(
-                real_imgs, texts, dinotxt_model,
-                isize=int(args["Isize"]), device=device
-            )
-            neg_heatmaps = interpret_dinotxt(
-                real_imgs, neg_texts, dinotxt_model,
-                isize=int(args["Isize"]), device=device
-            )
+                    real_imgs,
+                    texts,
+                    dinotxt_model,
+                    upsample_size=(H_prep, W_prep)
+                )
+
+                neg_heatmaps = interpret_dinotxt(
+                    real_imgs,
+                    neg_texts,
+                    dinotxt_model,
+                    upsample_size=(H_prep, W_prep)
+                )
 
             for j in range(0, len(heatmaps)):
                 pos_regions = [
