@@ -2,6 +2,8 @@ import numpy as np
 import torch.utils.data
 from tqdm import tqdm
 
+from arp_backends.dinotxt import load_dinotxt_backend
+
 from datasets.flicker import get_flicker1K_dataset
 from datasets.referit import get_refit_test_dataset
 from datasets.visual_genome import get_VGtest_dataset
@@ -297,6 +299,9 @@ def main(args=None):
             state_dict = checkpoint["state_dict"]
             blip_model.load_state_dict(state_dict)
         inference_blip(ds, blip_model, args)
+    elif args["dinotxt_eval"]:
+        dinotxt_backend = load_dinotxt_backend(device=device)
+
 
 def resize_then_center_crop_bbox(bbox, orig_size, out_size):
     """
@@ -367,6 +372,11 @@ if __name__ == "__main__":
     parser.add_argument("-val_path", "--val_path", default="", help="data set path", required=False)
     parser.add_argument("-dataset", "--dataset", default="flicker", help="dataset task", required=False)
     parser.add_argument("-img_path", "--img_path", default=1, help="dataset task", required=False)
+    parser.add_argument(
+        "-dinotxt_eval", "--dinotxt_eval",
+        default=False, action="store_true",
+        help="use dino.txt backend", required=False
+    )
     args = vars(parser.parse_args())
 
     main(args=args)

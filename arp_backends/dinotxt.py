@@ -1,4 +1,3 @@
-# arp_backends/dinotxt.py
 import torch
 import torch.nn.functional as F
 
@@ -7,7 +6,6 @@ from dinov2.hub.dinotxt import (
     get_tokenizer,
 )
 from dinov2.data.transforms import make_classification_eval_transform
-
 
 class DinoTxtBackend:
     def __init__(self, device: str = None):
@@ -93,7 +91,7 @@ class DinoTxtBackend:
 
         # Optional: ReLU + per-image max-normalization
         heatmaps = torch.relu(heatmaps)
-        flat = heatmaps.view(B, -1)
+        flat = heatmaps.reshape(B, -1)
         max_vals = flat.max(dim=1, keepdim=True).values.clamp(min=1e-6)
         heatmaps = heatmaps / max_vals.view(B, 1, 1, 1)
 
