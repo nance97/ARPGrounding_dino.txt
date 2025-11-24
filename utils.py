@@ -265,25 +265,35 @@ def interpret_meter(batch, model, device):
     return image_relevance
 
 
-def interpret_albef(images, texts, model, device):
-    bs = images.shape[0]
+import torch
+import torch.nn.functional as F
 
+def interpret_albef(images, texts, model, device):
+    """
+    images: [B,3,H,W]  (H=W=384 in ARPGrounding)
+    texts:  list[str] of length B
+    returns: [B,1,H,W] heatmaps
+    """
+    images = images.to(device)
+    bs, _, H, W = images.shape
+
+    # 1) Hook a cross-attention layer (same as original)
     layer_i = -4
     layer = model.text_encoder.encoder.layer[layer_i].crossattention.self
     layer.save_attention = True
 
     itc_score = model({"image": images, "text_input": texts}, mode="itm")
-    itc_score = torch.mean(itc_score[:, 1])
+    itc_score = torch.mean(itc_score[:, 1])   # scalar
 
-    attention_map = layer.get_attention_map()
+    attention_map = layer.get_attention_map()  # [B, heads, T_cam, N_img]
     layer.save_attention = False
 
     model.zero_grad()
-    cam = attention_map.detach()  # [bs, heads, T_cam, N_img]
-    grad = torch.autograd.grad(itc_score, [attention_map], retain_graph=True)[0].detach()
+    cam = attention_map  # keep as leaf for autograd
+    grad = torch.autograd.grad(itc_score, [cam], retain_graph=True)[0]
     grad = grad.clamp(min=0)
 
-    # Text tokenization
+    # 2) Tokenization & mask
     tokenized_text = model.tokenizer(
         texts,
         padding="max_length",
@@ -292,44 +302,58 @@ def interpret_albef(images, texts, model, device):
         return_tensors="pt",
     ).to(device)
 
-    attn_mask = tokenized_text.attention_mask  # usually [bs, L]
+    attn_mask = tokenized_text.attention_mask  # [B, L_tok] (or [1,L])
     if attn_mask.dim() == 1:
-        attn_mask = attn_mask.unsqueeze(0)     # [1, L]
+        attn_mask = attn_mask.unsqueeze(0)
 
-    # Align mask length to attention map text length
+    # Align mask length to attention text length
     _, _, T_cam, _ = cam.shape
-    attn_mask = attn_mask[:, :T_cam]          # [bs, T_cam] or [1, T_cam]
-
-    # If tokenizer somehow returned batch 1 but bs>1, expand
+    attn_mask = attn_mask[:, :T_cam]          # [B, T_cam] or [1, T_cam]
     if attn_mask.size(0) == 1 and bs > 1:
         attn_mask = attn_mask.expand(bs, -1)
 
-    # Now build token_mask via unsqueeze (no view, safe with broadcasting)
-    token_mask = attn_mask[:, None, :, None]  # [bs, 1, T_cam, 1]
-
-    token_length = attn_mask.sum(dim=-1) - 2  # keep their heuristic
+    token_mask = attn_mask[:, None, :, None]  # [B,1,T_cam,1]
+    token_length = attn_mask.sum(dim=-1) - 2  # same heuristic as original
 
     cam = cam * token_mask
     grad = grad * token_mask
 
-    cam = grad * cam
-    cam = cam[:, :, :, 1:].sum(dim=2).mean(dim=1) / (token_length + 2).unsqueeze(-1)
+    # 3) Aggregate over text + heads → per-image token relevance
+    cam = grad * cam                          # [B, heads, T_cam, N_img]
+    cam = cam[:, :, :, 1:]                    # drop CLS image token → [B,heads,T_cam,N_img-1]
+    cam = cam.sum(dim=2).mean(dim=1)          # sum over T, mean over heads → [B, N_flat]
 
-    image_relevance = cam.detach().clone()
+    # normalize by text length
+    cam = cam / (token_length + 2).unsqueeze(-1)  # [B, N_flat]
 
-    dim = int(image_relevance.shape[1] ** 0.5)
-    image_relevance = image_relevance.reshape(bs, 1, dim, dim)
-    image_relevance = torch.nn.functional.interpolate(
-        image_relevance, size=384, mode="bilinear", align_corners=False
-    )
+    image_relevance = cam.detach().clone()        # [B, N_flat]
 
-    # Per-image min-max normalization (simpler and safe)
+    # 4) We know visual grid is 24x24 = 576 patches (ViT-B/16, 384x384)
+    patch_size = 16
+    grid_h, grid_w = H // patch_size, W // patch_size  # 24,24
+    num_patches = grid_h * grid_w                      # 576
+
+    N_flat = image_relevance.shape[1]
+
+    if N_flat != num_patches:
+        # Expect N_flat = k * num_patches for some k (we see 2x,3x,...)
+        assert N_flat % num_patches == 0, f"Unexpected N_flat={N_flat}, not multiple of {num_patches}"
+        k = N_flat // num_patches
+        image_relevance = image_relevance.view(bs, k, num_patches).mean(dim=1)  # [B,576]
+
+    # 5) Reshape to spatial grid and upsample
+    image_relevance = image_relevance.view(bs, 1, grid_h, grid_w)        # [B,1,24,24]
+    image_relevance = F.interpolate(image_relevance, size=(H, W),
+                                    mode="bilinear", align_corners=False)
+
+    # 6) Per-image min-max normalization
     flat = image_relevance.view(bs, -1)
     min_val = flat.min(dim=1, keepdim=True)[0].view(bs, 1, 1, 1)
     max_val = flat.max(dim=1, keepdim=True)[0].view(bs, 1, 1, 1)
     image_relevance = (image_relevance - min_val) / (max_val - min_val + 1e-6)
 
-    return image_relevance
+    return image_relevance  # [B,1,H,W]
+
 
 
 def interpret_blip(images, texts, model, device):
