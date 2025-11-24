@@ -27,7 +27,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
-from transformers.models.bert.configuration_bert import BertConfig
+from transformers import BertConfig
 from lavis.common.utils import get_abs_path
 
 from lavis.models.base_model import BaseEncoder
