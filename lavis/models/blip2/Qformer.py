@@ -30,7 +30,7 @@ from transformers.modeling_utils import (
     prune_linear_layer,
 )
 from transformers.utils import logging
-from transformers.models.bert.configuration_bert import BertConfig
+from transformers import BertConfig
 
 logger = logging.get_logger(__name__)
 
