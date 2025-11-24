@@ -23,12 +23,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithCrossAttentions,
     MaskedLMOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
-)
+from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers import BertConfig
 
@@ -284,27 +279,7 @@ class BertAttention(nn.Module):
         self.pruned_heads = set()
 
     def prune_heads(self, heads):
-        if len(heads) == 0:
-            return
-        heads, index = find_pruneable_heads_and_indices(
-            heads,
-            self.self.num_attention_heads,
-            self.self.attention_head_size,
-            self.pruned_heads,
-        )
-
-        # Prune linear layers
-        self.self.query = prune_linear_layer(self.self.query, index)
-        self.self.key = prune_linear_layer(self.self.key, index)
-        self.self.value = prune_linear_layer(self.self.value, index)
-        self.output.dense = prune_linear_layer(self.output.dense, index, dim=1)
-
-        # Update hyper params and store pruned heads
-        self.self.num_attention_heads = self.self.num_attention_heads - len(heads)
-        self.self.all_head_size = (
-            self.self.attention_head_size * self.self.num_attention_heads
-        )
-        self.pruned_heads = self.pruned_heads.union(heads)
+        return
 
     def forward(
         self,
@@ -433,27 +408,22 @@ class BertLayer(nn.Module):
                     outputs + cross_attention_outputs[1:-1]
                 )  # add cross attentions if we output attention weights
 
-            layer_output = apply_chunking_to_forward(
-                self.feed_forward_chunk_query,
-                self.chunk_size_feed_forward,
-                self.seq_len_dim,
-                query_attention_output,
-            )
+            # feed-forward on query tokens
+            layer_output_query = self.feed_forward_chunk_query(query_attention_output)
+
+            # optionally feed-forward on text tokens (if any) and concat back
             if attention_output.shape[1] > query_length:
-                layer_output_text = apply_chunking_to_forward(
-                    self.feed_forward_chunk,
-                    self.chunk_size_feed_forward,
-                    self.seq_len_dim,
-                    attention_output[:, query_length:, :],
+                layer_output_text = self.feed_forward_chunk(
+                    attention_output[:, query_length:, :]
                 )
-                layer_output = torch.cat([layer_output, layer_output_text], dim=1)
+                layer_output = torch.cat(
+                    [layer_output_query, layer_output_text], dim=1
+                )
+            else:
+                layer_output = layer_output_query
         else:
-            layer_output = apply_chunking_to_forward(
-                self.feed_forward_chunk,
-                self.chunk_size_feed_forward,
-                self.seq_len_dim,
-                attention_output,
-            )
+            # full sequence feed-forward
+            layer_output = self.feed_forward_chunk(attention_output)
         outputs = (layer_output,) + outputs
 
         outputs = outputs + (present_key_value,)
