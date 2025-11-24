@@ -280,15 +280,23 @@ def interpret_albef(images, texts, model, device):
     cam = attention_map.detach()
     grad = torch.autograd.grad(itc_score, [attention_map], retain_graph=True)[0].detach()
     grad = grad.clamp(min=0)
+
+    # cam: [bs, heads, T_cam, N_img]
+    _, _, T_cam, _ = cam.shape
+
     tokenized_text = model.tokenizer(
         texts,
         padding="max_length",
         truncation=True,
         max_length=model.max_txt_len,
-        return_tensors='pt'
+        return_tensors="pt",
     ).to(device)
-    token_mask = tokenized_text.attention_mask.view(bs, 1, -1, 1)
-    token_length = tokenized_text.attention_mask.sum(dim=-1) - 2
+
+    attn_mask = tokenized_text.attention_mask  # [bs, L_tok]
+
+    # build mask that matches cam's text length
+    token_mask = attn_mask[:, :T_cam].view(bs, 1, T_cam, 1)  # [bs,1,T_cam,1]
+    token_length = attn_mask.sum(dim=-1) - 2  # keep as in original paper/code
 
     cam = cam * token_mask
     grad = grad * token_mask
@@ -300,11 +308,18 @@ def interpret_albef(images, texts, model, device):
 
     dim = int(image_relevance.shape[1] ** 0.5)
     image_relevance = image_relevance.reshape(bs, 1, dim, dim)
-    image_relevance = torch.nn.functional.interpolate(image_relevance, size=384, mode="bilinear", align_corners=False)
+    image_relevance = torch.nn.functional.interpolate(
+        image_relevance, size=384, mode="bilinear", align_corners=False
+    )
 
-    min_value = image_relevance.view(bs, -1).min(dim=1)[0].repeat(1, 1, 1, 1).permute(3, 2, 1, 0).expand(image_relevance.size())
-    max_value = image_relevance.view(bs, -1).max(dim=1)[0].repeat(1, 1, 1, 1).permute(3, 2, 1, 0).expand(image_relevance.size())
-    image_relevance = (image_relevance - min_value) / (max_value - min_value)
+    # simpler, safer per-image min-max norm
+    flat = image_relevance.view(bs, -1)
+    min_val = flat.min(dim=1, keepdim=True)[0]  # [bs,1]
+    max_val = flat.max(dim=1, keepdim=True)[0]  # [bs,1]
+    min_val = min_val.view(bs, 1, 1, 1)
+    max_val = max_val.view(bs, 1, 1, 1)
+    image_relevance = (image_relevance - min_val) / (max_val - min_val + 1e-6)
+
     return image_relevance
 
 
