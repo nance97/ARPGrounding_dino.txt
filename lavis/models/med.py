@@ -27,6 +27,7 @@ from transformers.modeling_outputs import (
 )
 from transformers.modeling_utils import (
     PreTrainedModel,
+    apply_chunking_to_forward,
     find_pruneable_heads_and_indices,
     prune_linear_layer,
 )
@@ -471,7 +472,12 @@ class BertLayer(nn.Module):
                 outputs = (
                     outputs + cross_attention_outputs[1:-1]
                 )  # add cross attentions if we output attention weights
-        layer_output = self.feed_forward_chunk(attention_output)
+        layer_output = apply_chunking_to_forward(
+            self.feed_forward_chunk,
+            self.chunk_size_feed_forward,
+            self.seq_len_dim,
+            attention_output,
+        )
         outputs = (layer_output,) + outputs
 
         outputs = outputs + (present_key_value,)
