@@ -271,19 +271,19 @@ def interpret_albef(images, texts, model, device):
     layer_i = -4
     layer = model.text_encoder.encoder.layer[layer_i].crossattention.self
     layer.save_attention = True
+
     itc_score = model({"image": images, "text_input": texts}, mode="itm")
     itc_score = torch.mean(itc_score[:, 1])
+
     attention_map = layer.get_attention_map()
     layer.save_attention = False
 
     model.zero_grad()
-    cam = attention_map.detach()
+    cam = attention_map.detach()  # [bs, heads, T_cam, N_img]
     grad = torch.autograd.grad(itc_score, [attention_map], retain_graph=True)[0].detach()
     grad = grad.clamp(min=0)
 
-    # cam: [bs, heads, T_cam, N_img]
-    _, _, T_cam, _ = cam.shape
-
+    # Text tokenization
     tokenized_text = model.tokenizer(
         texts,
         padding="max_length",
@@ -292,11 +292,22 @@ def interpret_albef(images, texts, model, device):
         return_tensors="pt",
     ).to(device)
 
-    attn_mask = tokenized_text.attention_mask  # [bs, L_tok]
+    attn_mask = tokenized_text.attention_mask  # usually [bs, L]
+    if attn_mask.dim() == 1:
+        attn_mask = attn_mask.unsqueeze(0)     # [1, L]
 
-    # build mask that matches cam's text length
-    token_mask = attn_mask[:, :T_cam].view(bs, 1, T_cam, 1)  # [bs,1,T_cam,1]
-    token_length = attn_mask.sum(dim=-1) - 2  # keep as in original paper/code
+    # Align mask length to attention map text length
+    _, _, T_cam, _ = cam.shape
+    attn_mask = attn_mask[:, :T_cam]          # [bs, T_cam] or [1, T_cam]
+
+    # If tokenizer somehow returned batch 1 but bs>1, expand
+    if attn_mask.size(0) == 1 and bs > 1:
+        attn_mask = attn_mask.expand(bs, -1)
+
+    # Now build token_mask via unsqueeze (no view, safe with broadcasting)
+    token_mask = attn_mask[:, None, :, None]  # [bs, 1, T_cam, 1]
+
+    token_length = attn_mask.sum(dim=-1) - 2  # keep their heuristic
 
     cam = cam * token_mask
     grad = grad * token_mask
@@ -312,12 +323,10 @@ def interpret_albef(images, texts, model, device):
         image_relevance, size=384, mode="bilinear", align_corners=False
     )
 
-    # simpler, safer per-image min-max norm
+    # Per-image min-max normalization (simpler and safe)
     flat = image_relevance.view(bs, -1)
-    min_val = flat.min(dim=1, keepdim=True)[0]  # [bs,1]
-    max_val = flat.max(dim=1, keepdim=True)[0]  # [bs,1]
-    min_val = min_val.view(bs, 1, 1, 1)
-    max_val = max_val.view(bs, 1, 1, 1)
+    min_val = flat.min(dim=1, keepdim=True)[0].view(bs, 1, 1, 1)
+    max_val = flat.max(dim=1, keepdim=True)[0].view(bs, 1, 1, 1)
     image_relevance = (image_relevance - min_val) / (max_val - min_val + 1e-6)
 
     return image_relevance
