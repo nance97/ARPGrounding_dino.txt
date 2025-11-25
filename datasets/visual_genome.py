@@ -82,6 +82,8 @@ class BucketImageLoader(ImageLoader):
         with open(self.imgs_data_folder, 'rb') as f:
             self.imgs_data = pickle.load(f, encoding='latin1')
         self.img_folder = os.path.join(data_root, "VG_Images")
+        print("IMG FOLDER =", self.img_folder)
+
 
         self.transform = transform
         self.loader = loader
