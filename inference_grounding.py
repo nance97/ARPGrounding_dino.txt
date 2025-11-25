@@ -262,6 +262,68 @@ def inference_blip(ds, blip_model, args):
         pbar.set_description(prnt)
     print(prnt)
 
+def inference_dinotxt(ds, dinotxt_backend, args):
+    pbar = tqdm(ds)
+    cnt_overall = 0
+    cnt_correct = 0
+    cnt_correct_hit = 0
+    att_correct = 0
+
+    for i, (real_imgs, meta, size, _) in enumerate(pbar):
+        if len(list(meta.keys())) == 0:
+            continue
+        real_imgs = real_imgs.cuda()
+        size = [int(size[0]), int(size[1])]
+
+        # Two code paths, exactly like CLIP / METER / ALBEF / BLIP
+        if args["dataset"] == "flicker" or args["task"] == "vg_train" or args["task"] == "coco":
+            # meta: dict[ sentence -> item ]
+            for sen in meta.keys():
+                item = meta[sen]
+                titles, bbox = no_tuple(item["sentences"]), item["bbox"]   # titles is a list[str]
+
+                # Repeat image for each sentence
+                curr_image = real_imgs.repeat(len(titles), 1, 1, 1)
+                # DinoTxtBackend expects list[str] of length B
+                heatmaps = dinotxt_backend.get_heatmaps(curr_image, titles)    # [B, 1, H, W]
+
+                # Average across all sentences (same as .mean(dim=0) in CLIP path)
+                heatmap = heatmaps.mean(dim=0).squeeze(0).detach().clone().cpu().numpy()
+                bbox_c, hit_c, att_c = calc_correctness(bbox, heatmap.astype(np.float32), size)
+                cnt_correct += bbox_c
+                cnt_correct_hit += hit_c
+                att_correct += att_c
+                cnt_overall += 1
+        else:
+            # meta: dict[ id -> { "sentences": [...], "bbox": ... } ]
+            texts = []
+            bboxes = []
+            for item in list(meta.values()):
+                texts.append(item["sentences"][0])
+                bboxes.append(item["bbox"])
+
+            # Repeat image for each text, like CLIP
+            curr_image = real_imgs.repeat(len(texts), 1, 1, 1)
+            heatmaps = dinotxt_backend.get_heatmaps(curr_image, texts)        # [B, 1, H, W]
+
+            for k, heatmap in enumerate(heatmaps):
+                heatmap = heatmap.mean(dim=0).squeeze().detach().clone().cpu().numpy().astype(np.float32)
+                bbox_c, hit_c, att_c = calc_correctness(bboxes[k], heatmap, size)
+                cnt_correct += bbox_c
+                cnt_correct_hit += hit_c
+                att_correct += att_c
+                cnt_overall += 1
+
+        bbox_correctness = 100.0 * cnt_correct / cnt_overall
+        hit_correctness = 100.0 * cnt_correct_hit / cnt_overall
+        att_correctness = 100.0 * att_correct / cnt_overall
+        prnt = "bbox_correctness:{:.2f}; hit_correctness:{:.2f}; att_correctness:{:.2f}".format(
+            bbox_correctness, hit_correctness, att_correctness
+        )
+        pbar.set_description(prnt)
+
+    print(prnt)
+
 
 def main(args=None):
     gpu_num = torch.cuda.device_count()
@@ -301,6 +363,11 @@ def main(args=None):
         inference_blip(ds, blip_model, args)
     elif args["dinotxt_eval"]:
         dinotxt_backend = load_dinotxt_backend(device=device)
+        testset.transform = dinotxt_backend.preprocess
+        ds = torch.utils.data.DataLoader(
+            testset, batch_size=1, num_workers=int(args["nW"]), shuffle=False, drop_last=False
+        )
+        inference_dinotxt(ds, dinotxt_backend, args)
 
 
 def resize_then_center_crop_bbox(bbox, orig_size, out_size):
