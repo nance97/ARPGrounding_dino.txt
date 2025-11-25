@@ -275,39 +275,45 @@ def inference_dinotxt(ds, dinotxt_backend, args):
         real_imgs = real_imgs.cuda()
         size = [int(size[0]), int(size[1])]
 
-        # Two code paths, exactly like CLIP / METER / ALBEF / BLIP
         if args["dataset"] == "flicker":
-            # meta: dict[ sentence -> item ]
+            # same as before, but we can also chunk if needed
             for sen in meta.keys():
                 item = meta[sen]
-                titles, bbox = no_tuple(item["sentences"]), item["bbox"]   # titles is a list[str]
-
-                # Repeat image for each sentence
+                titles, bbox = no_tuple(item["sentences"]), item["bbox"]
                 curr_image = real_imgs.repeat(len(titles), 1, 1, 1)
-                # DinoTxtBackend expects list[str] of length B
-                heatmaps = dinotxt_backend.get_heatmaps(curr_image, titles)    # [B, 1, H, W]
-
-                # Average across all sentences (same as .mean(dim=0) in CLIP path)
+                heatmaps = dinotxt_backend.get_heatmaps(curr_image, titles)  # [T, 1, H, W]
                 heatmap = heatmaps.mean(dim=0).squeeze(0).detach().clone().cpu().numpy()
                 bbox_c, hit_c, att_c = calc_correctness(bbox, heatmap.astype(np.float32), size)
                 cnt_correct += bbox_c
                 cnt_correct_hit += hit_c
                 att_correct += att_c
                 cnt_overall += 1
+
         else:
-            # meta: dict[ id -> { "sentences": [...], "bbox": ... } ]
+            # ------- CHUNKED VERSION FOR VG / REFIT -------
             texts = []
             bboxes = []
             for item in list(meta.values()):
                 texts.append(item["sentences"][0])
                 bboxes.append(item["bbox"])
 
-            # Repeat image for each text, like CLIP
-            curr_image = real_imgs.repeat(len(texts), 1, 1, 1)
-            heatmaps = dinotxt_backend.get_heatmaps(curr_image, texts)        # [B, 1, H, W]
+            all_heatmaps = []
+            base_image = real_imgs  # [1, 3, H, W]
+
+            chunk_size = 4  # you can try 8 if memory allows
+
+            for start in range(0, len(texts), chunk_size):
+                end = start + chunk_size
+                chunk_texts = texts[start:end]
+                # repeat image only for this small chunk
+                curr_image = base_image.repeat(len(chunk_texts), 1, 1, 1)
+                hm_chunk = dinotxt_backend.get_heatmaps(curr_image, chunk_texts)  # [C, 1, H, W]
+                all_heatmaps.append(hm_chunk.cpu())
+
+            heatmaps = torch.cat(all_heatmaps, dim=0)  # [N, 1, H, W], N == len(texts)
 
             for k, heatmap in enumerate(heatmaps):
-                heatmap = heatmap.mean(dim=0).squeeze().detach().clone().cpu().numpy().astype(np.float32)
+                heatmap = heatmap.mean(dim=0).squeeze().numpy().astype(np.float32)
                 bbox_c, hit_c, att_c = calc_correctness(bboxes[k], heatmap, size)
                 cnt_correct += bbox_c
                 cnt_correct_hit += hit_c
