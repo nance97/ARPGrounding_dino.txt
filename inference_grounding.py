@@ -276,7 +276,7 @@ def inference_dinotxt(ds, dinotxt_backend, args):
         size = [int(size[0]), int(size[1])]
 
         # Two code paths, exactly like CLIP / METER / ALBEF / BLIP
-        if args["dataset"] == "flicker" or args["task"] == "vg_train" or args["task"] == "coco":
+        if args["dataset"] == "flicker":
             # meta: dict[ sentence -> item ]
             for sen in meta.keys():
                 item = meta[sen]
