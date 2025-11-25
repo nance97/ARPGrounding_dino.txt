@@ -27,12 +27,11 @@ class ImageLoader(torch.utils.data.Dataset):
         self.splits_folder = os.path.join(root, "VG_Splits", "data_splits.pickle")
         self.annotations_folder = os.path.join(root, "VG_Annotations", "region_descriptions.json")
         with open(self.annotations_folder, "rb") as f:
-            self.annotations = json.load(f, encoding="latin1")
+            self.annotations = json.load(f)
         with open(self.splits_folder, "rb") as f:
-            self.splits = pickle.load(f, encoding="latin1")
+            self.splits = pickle.load(f)
         with open(self.imgs_data_folder, "rb") as f:
-            self.imgs_data = pickle.load(f, encoding="latin1")
-        self.img_folder = os.path.join(root, "VG_Images")
+            self.imgs_data = pickle.load(f)
 
         self.transform = transform
         self.loader = loader
