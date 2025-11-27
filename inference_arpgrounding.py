@@ -89,6 +89,7 @@ if __name__ == "__main__":
     cnt_overall1, cnt_overall2, cnt_overall = 0, 0, 0
     cnt_correct1, cnt_correct2, cnt_correct = 0, 0, 0
     pos_area, neg_area = 0, 0
+    results = []
     for i, inputs in enumerate(pbar):
         real_imgs, meta, size, _ = inputs
         if len(list(meta.keys())) == 0:
@@ -158,7 +159,6 @@ if __name__ == "__main__":
                 heatmaps = dinotxt_backend.get_heatmaps(real_imgs, texts).detach()
                 neg_heatmaps = dinotxt_backend.get_heatmaps(real_imgs, neg_texts).detach()
 
-            results = []
             for j in range(0, len(heatmaps)):
                 pos_regions = [
                     heatmaps[j, 0, pos_bboxes[j][1] : pos_bboxes[j][3], pos_bboxes[j][0] : pos_bboxes[j][2]],
@@ -228,18 +228,18 @@ if __name__ == "__main__":
             prnt = "correctness1:{:.2f}%, correctness2:{:.2f}%, correctness:{:.2f}%".format(correctness1, correctness2, correctness)
             pbar.set_description(prnt)
 
-            # ----------------- save results to disk -----------------
-            out_dir = Path("arp_logs")
-            out_dir.mkdir(exist_ok=True)
-
-            out_path = out_dir / f"{backend_name}_{args['split']}.json"
-            with out_path.open("w") as f:
-                json.dump(results, f)
-
-            print(f"Saved per-sample results to {out_path}")
-            # ----------------- end save -----------------
-
         except Exception as e:  # skip OOM samples
             print(str(e))
 
     print(prnt)
+
+    # 2) ---- save results after the whole loop, once ----
+    out_dir = Path("arp_logs")
+    out_dir.mkdir(exist_ok=True)
+
+    out_path = out_dir / f"{backend_name}_{args['split']}.json"
+    with out_path.open("w") as f:
+        json.dump(results, f)
+
+    print(f"Saved per-sample results to {out_path}")
+    # ---- end save ----
