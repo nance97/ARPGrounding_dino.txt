@@ -323,7 +323,7 @@ def inference_dinotxt(ds, dinotxt_backend, args):
         bbox_correctness = 100.0 * cnt_correct / cnt_overall
         hit_correctness = 100.0 * cnt_correct_hit / cnt_overall
         att_correctness = 100.0 * att_correct / cnt_overall
-        prnt = "bbox_correctness:{:.2f}; hit_correctness:{:.2f}; att_correctness:{:.2f}".format(
+        prnt = "bbox_correctness:{:.2f}; hit_correctness:{:.2f}".format(
             bbox_correctness, hit_correctness, att_correctness
         )
         pbar.set_description(prnt)

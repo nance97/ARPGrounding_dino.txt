@@ -4,6 +4,9 @@ from arp_backends.dinotxt import load_dinotxt_backend
 import torch
 from tqdm import tqdm
 
+import json
+from pathlib import Path
+
 from datasets.arpgrounding import get_dataset
 from inference_grounding import interpret_albef, interpret_blip, interpret_clip, meter_make_batch, interpret_meter
 
@@ -56,6 +59,7 @@ if __name__ == "__main__":
     Isize = int(args["Isize"])
 
     if args["clip_eval"]:
+        backend_name = "clip"
         clip_model, _ = clip.load(args["clip_path"], device=device, jit=False)
     elif args["meter_eval"]:
         config = meter_config()
@@ -77,6 +81,7 @@ if __name__ == "__main__":
             state_dict = checkpoint["state_dict"]
             blip_model.load_state_dict(state_dict)
     elif args["dinotxt_eval"]:
+        backend_name = "dinotxt"
         dinotxt_backend = load_dinotxt_backend(device=device)
 
     # Inference
@@ -153,6 +158,7 @@ if __name__ == "__main__":
                 heatmaps = dinotxt_backend.get_heatmaps(real_imgs, texts).detach()
                 neg_heatmaps = dinotxt_backend.get_heatmaps(real_imgs, neg_texts).detach()
 
+            results = []
             for j in range(0, len(heatmaps)):
                 pos_regions = [
                     heatmaps[j, 0, pos_bboxes[j][1] : pos_bboxes[j][3], pos_bboxes[j][0] : pos_bboxes[j][2]],
@@ -173,6 +179,40 @@ if __name__ == "__main__":
                 # neg_act = neg_region.mean()
                 pos_act = [pos_region.mean() for pos_region in pos_regions]
                 neg_act = [neg_region.mean() for neg_region in neg_regions]
+
+                try:
+                    items_list = list(meta.values())
+                    item_j = items_list[j]
+                except Exception:
+                    item_j = {}
+
+                category = (
+                    item_j.get("attr_type", None)
+                    or item_j.get("rel_type", None)
+                    or item_j.get("type", None)
+                )
+
+                record = {
+                    "backend": backend_name,          # "dinotxt", "clip", ...
+                    "split": args["split"],           # "attribute", "relation", "priority"
+                    "global_idx": int(i),             # dataset index
+                    "local_idx": int(j),              # index within this sample
+                    "pos_text": texts[j],
+                    "neg_text": neg_texts[j],
+                    "pos_bbox": [int(x) for x in pos_bboxes[j]],
+                    "neg_bbox": [int(x) for x in neg_bboxes[j]],
+                    "pos_act_pos": float(pos_act[0]),   # POS heatmap on POS box
+                    "pos_act_neg": float(neg_act[0]),   # POS heatmap on NEG box
+                    "neg_act_pos": float(pos_act[1]),   # NEG heatmap on POS box
+                    "neg_act_neg": float(neg_act[1]),   # NEG heatmap on NEG box
+                    "cond1": bool(pos_act[0] > neg_act[0]),
+                    "cond2": bool(pos_act[1] > neg_act[1]),
+                    "correct": bool(pos_act[0] > neg_act[0] and pos_act[1] > neg_act[1]),
+                    "category": category,              # for Fig. 5 (A_Action, A_Color, etc.)
+                    # "img_path": img_path,            # uncomment if you have img_path in scope
+                }
+                results.append(record)
+
                 if pos_act[0] > neg_act[0]:
                     cnt_correct1 += 1
                 cnt_overall1 += 1
@@ -187,6 +227,17 @@ if __name__ == "__main__":
             correctness = 100.0 * cnt_correct / cnt_overall
             prnt = "correctness1:{:.2f}%, correctness2:{:.2f}%, correctness:{:.2f}%".format(correctness1, correctness2, correctness)
             pbar.set_description(prnt)
+
+            # ----------------- save results to disk -----------------
+            out_dir = Path("arp_logs")
+            out_dir.mkdir(exist_ok=True)
+
+            out_path = out_dir / f"{backend_name}_{args['split']}.json"
+            with out_path.open("w") as f:
+                json.dump(results, f)
+
+            print(f"Saved per-sample results to {out_path}")
+            # ----------------- end save -----------------
 
         except Exception as e:  # skip OOM samples
             print(str(e))
