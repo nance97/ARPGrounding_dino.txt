@@ -247,6 +247,12 @@ class DinoTxtFusionBackend:
         heat = heat / max_vals.view(B, 1, 1, 1)
 
         return heat  # [B, 1, H, W]
+    
+    def __call__(self, images, texts):
+        """
+        ARPGrounding expects __call__(images, texts) to return ONLY the heatmap.
+        """
+        return self.get_heatmaps(images, texts)
 
 
 def load_dinotxt_fusion_backend(
