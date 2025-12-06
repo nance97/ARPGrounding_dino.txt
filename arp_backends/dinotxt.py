@@ -247,6 +247,26 @@ class DinoTxtFusionBackend:
 
         # 4) Run fusion encoder, ask for attention if you still want attn-based maps
         fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
+        # attn: [B, n_heads, L, P]
+
+        if not hasattr(self, "_debug_count"):
+            self._debug_count = 0
+
+        if self._debug_count < 20:
+            B, H, L_attn, P = attn.shape
+            token_idx = L_attn - 1
+            attn_token = attn[:, :, token_idx, :]  # [B, H, P]
+
+            # entropy per head over patches
+            probs = attn_token  # already softmaxed over P
+            entropy = -(probs * (probs.clamp_min(1e-8).log())).sum(dim=-1)  # [B, H]
+            print(f"[ATTN DEBUG] mean entropy over heads: {entropy.mean().item():.3f}, "
+                f"min: {entropy.min().item():.3f}, max: {entropy.max().item():.3f}")
+
+            # also check variance across patches
+            print(f"[ATTN DEBUG] per-head std over patches: {probs.std(dim=-1).mean().item():.5f}")
+            self._debug_count += 1
+
         # attn: [B_txt, n_heads, L, P]
 
         if attn is None:
@@ -256,9 +276,7 @@ class DinoTxtFusionBackend:
         assert B == B_txt and P_attn == P
 
         # 5) Choose which token to use (here: last token, like you already did)
-        token_idx = L_attn - 1
-        attn_token = attn[:, :, token_idx, :]      # [B_txt, n_heads, P]
-        attn_mean  = attn_token.mean(dim=1)        # [B_txt, P]
+        attn_mean = attn.mean(dim=2).mean(dim=1)  # [B, P]
 
         # 6) reshape to spatial map
         H_p = W_p = int(P ** 0.5)

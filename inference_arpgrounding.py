@@ -86,6 +86,11 @@ if __name__ == "__main__":
         fusion_ckpt = FUSION_CKPT_DEFAULT
         dinotxt_backend = load_dinotxt_fusion_backend(device=device, fusion_ckpt=fusion_ckpt)
 
+        print("Fusion ckpt loaded from:", fusion_ckpt)
+        print("First layer weight norm:", dinotxt_backend.fusion.layers[0].self_attn.in_proj_weight.norm().item())
+        print("ITM head weight norm:", dinotxt_backend.fusion.itm_head.weight.norm().item())
+
+
     # Inference
     pbar = tqdm(dl)
     cnt_overall1, cnt_overall2, cnt_overall = 0, 0, 0
