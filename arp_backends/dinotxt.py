@@ -120,8 +120,9 @@ class DinoTxtFusionBackend:
         self.model.to(device)        # dino.txt frozen backbone
         self.fusion.to(device)       # multimodal fusion encoder
         return self
-
+    
     @torch.no_grad()
+    @torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
     def _get_visual_tokens(self, images: torch.Tensor) -> torch.Tensor:
         """
         images: [B, 3, H, W]
