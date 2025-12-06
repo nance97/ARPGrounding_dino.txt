@@ -211,71 +211,67 @@ class DinoTxtFusionBackend:
     @torch.no_grad()
     def get_heatmaps(self, images: torch.Tensor, texts: list[str]) -> torch.Tensor:
         """
-        images: [B, 3, H, W]
-        texts:  list[str] of length B
-        returns:
-            heatmaps: [B, 1, H, W] in [0, 1]
-        """
-        B, _, H, W = images.shape
+        images: [B_img, 3, H, W]  (ARPG: B_img == 1)
+        texts:  list[str] of length B_txt (can be > 1 for multi-composition images)
 
-        # 1) frozen tokens
-        img_tokens = self._get_visual_tokens(images)         # [B, P, D]
-        txt_tokens = self._get_text_token_batch(texts)       # [B, L, D]
+        returns:
+            heatmaps: [B_txt, 1, H, W]  (one heatmap per text)
+        """
+        # 1) Shapes
+        B_img_in, _, H, W = images.shape
+
+        # 2) Frozen tokens
+        img_tokens = self._get_visual_tokens(images)     # [B_img, P, D]
+        txt_tokens = self._get_text_token_batch(texts)   # [B_txt, L, D]
 
         B_img, P, D  = img_tokens.shape
         B_txt, L, D2 = txt_tokens.shape
+        assert D == D2, f"D mismatch: img_tokens={D}, txt_tokens={D2}"
 
-        print(
-            f"[DEBUG] B_img={B_img}, B_txt={B_txt}, "
-            f"P={P}, L={L}, len(texts)={len(texts)}, ",
-            flush=True,
-        )
+        # Debug (optional)
+        # print(f"[DEBUG] B_img={B_img}, B_txt={B_txt}, P={P}, L={L}, len(texts)={len(texts)}")
 
-        if B_txt > 1:
-            print(f"[HM_INSPECT] B_txt={B_txt}, texts:")
-            for t in texts:
-                print("   ", repr(t))
-            print("============================================", flush=True)
+        # 3) Make batch sizes match: replicate image for each text
+        if B_img == 1 and B_txt > 1:
+            # expand: [1, P, D] -> [B_txt, P, D] (no new memory, just view)
+            img_tokens = img_tokens.expand(B_txt, P, D)
+            B_img = B_txt
+        elif B_img != B_txt:
+            raise RuntimeError(
+                f"Batch mismatch: img_tokens={img_tokens.shape}, "
+                f"txt_tokens={txt_tokens.shape}, len(texts)={len(texts)}"
+            )
 
-        # VERIFY: we expect this to sometimes FAIL
-        assert B_img == B_txt, (
-            f"Batch mismatch before fusion: "
-            f"img_tokens={img_tokens.shape}, txt_tokens={txt_tokens.shape}, "
-            f"len(texts)={len(texts)}"
-        )
-
-        # 2) run fusion encoder, capturing last-layer cross-attn
+        # 4) Run fusion encoder, ask for attention if you still want attn-based maps
         fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
-        print("attn_output shape inside fusion:", attn.shape)
-        print("img_tokens:", img_tokens.shape, "txt_tokens:", txt_tokens.shape)
-        # attn: [B, n_heads, L, P]
+        # attn: [B_txt, n_heads, L, P]
 
         if attn is None:
             raise RuntimeError("Fusion encoder did not return attention maps.")
 
-        B2, n_heads, L, P = attn.shape
-        assert B2 == B
+        B, n_heads, L_attn, P_attn = attn.shape
+        assert B == B_txt and P_attn == P
 
-        # For now: use attention from the LAST token (or choose something smarter later)
-        token_idx = L - 1
-        attn_token = attn[:, :, token_idx, :]      # [B, n_heads, P]
-        attn_mean = attn_token.mean(dim=1)         # [B, P]
+        # 5) Choose which token to use (here: last token, like you already did)
+        token_idx = L_attn - 1
+        attn_token = attn[:, :, token_idx, :]      # [B_txt, n_heads, P]
+        attn_mean  = attn_token.mean(dim=1)        # [B_txt, P]
 
-        # 3) reshape to spatial map
+        # 6) reshape to spatial map
         H_p = W_p = int(P ** 0.5)
         assert H_p * W_p == P, f"cannot reshape P={P} into square grid"
-        heat = attn_mean.view(B, 1, H_p, W_p)      # [B, 1, H_p, W_p]
+        heat = attn_mean.view(B_txt, 1, H_p, W_p)  # [B_txt, 1, H_p, W_p]
 
-        # 4) upsample to image resolution
+        # 7) upsample to image resolution
         heat = F.interpolate(heat, size=(H, W), mode="bicubic", align_corners=False)
 
-        # 5) normalize to [0,1]
+        # 8) normalize to [0,1]
         heat = torch.relu(heat)
-        flat = heat.view(B, -1)
+        flat = heat.view(B_txt, -1)
         max_vals = flat.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-        heat = heat / max_vals.view(B, 1, 1, 1)
+        heat = heat / max_vals.view(B_txt, 1, 1, 1)
 
-        return heat  # [B, 1, H, W]
+        return heat  # [B_txt, 1, H, W]
     
     def __call__(self, images, texts):
         """
