@@ -25,6 +25,7 @@ class MultiModalBlock(nn.Module):
             embed_dim=d_model,
             num_heads=n_heads,
             batch_first=True,  # query [B, L, D], key/value [B, P, D]
+
         )
 
         self.ffn = nn.Sequential(
@@ -51,7 +52,11 @@ class MultiModalBlock(nn.Module):
 
         # 2) text->image cross-attention
         ca_out, attn = self.cross_attn(
-            query=x, key=img_tokens, value=img_tokens, need_weights=need_attn
+            query=x,
+            key=img_tokens,
+            value=img_tokens,
+            need_weights=need_attn,
+            average_attn_weights=False,  # <<--- ADD THIS
         )
         x = x + self.dropout(ca_out)
         x = self.norm2(x)
