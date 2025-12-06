@@ -1,5 +1,5 @@
 import argparse
-from arp_backends.dinotxt import load_dinotxt_backend
+from arp_backends.dinotxt import load_dinotxt_fusion_backend
 
 import torch
 from tqdm import tqdm
@@ -28,6 +28,7 @@ try:
 except Exception:
     pass
 
+FUSION_CKPT_DEFAULT = "/home/disi/dinotxt_fusion_itm_coco.pt"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Description of your program")
@@ -82,7 +83,8 @@ if __name__ == "__main__":
             blip_model.load_state_dict(state_dict)
     elif args["dinotxt_eval"]:
         backend_name = "dinotxt"
-        dinotxt_backend = load_dinotxt_backend(device=device)
+        fusion_ckpt = FUSION_CKPT_DEFAULT
+        dinotxt_backend = load_dinotxt_fusion_backend(device=device, fusion_ckpt=fusion_ckpt)
 
     # Inference
     pbar = tqdm(dl)
@@ -186,6 +188,8 @@ if __name__ == "__main__":
                 except Exception:
                     item_j = {}
 
+                
+
                 category = (
                     item_j.get("attr_type", None)
                     or item_j.get("rel_type", None)
@@ -208,8 +212,6 @@ if __name__ == "__main__":
                     "cond1": bool(pos_act[0] > neg_act[0]),
                     "cond2": bool(pos_act[1] > neg_act[1]),
                     "correct": bool(pos_act[0] > neg_act[0] and pos_act[1] > neg_act[1]),
-                    "category": category,              # for Fig. 5 (A_Action, A_Color, etc.)
-                    # "img_path": img_path,            # uncomment if you have img_path in scope
                 }
                 results.append(record)
 
