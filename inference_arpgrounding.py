@@ -28,7 +28,7 @@ try:
 except Exception:
     pass
 
-FUSION_CKPT_DEFAULT = "/home/disi/dinotxt_fusion_itm_coco.pt"
+FUSION_CKPT_DEFAULT = "/home/disi/dinotxt/dinotxt_fusion_itm_coco.pt"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Description of your program")
