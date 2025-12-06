@@ -219,39 +219,43 @@ class DinoTxtFusionBackend:
         B, _, H, W = images.shape
 
         # 1) frozen tokens
-        img_tokens = self._get_visual_tokens(images)         # [B, P, D]
-        txt_tokens = self._get_text_token_batch(texts)       # [B, L, D]
+        img_tokens = self._get_visual_tokens(images)   # [B, P, D]
+        txt_tokens = self._get_text_token_batch(texts) # [B, L, D]
 
-        # 2) run fusion encoder, capturing last-layer cross-attn
-        fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
-        print("attn_output shape inside fusion:", attn.shape)
-        print("img_tokens:", img_tokens.shape, "txt_tokens:", txt_tokens.shape)
-        # attn: [B, n_heads, L, P]
+        # 2) run fusion encoder, BUT DO NOT request attention maps
+        #    We just want fused text tokens.
+        self.model.eval()
+        self.fusion.eval()
+        fused_txt, _ = self.fusion(txt_tokens, img_tokens, return_attn=False)  # [B, L, D]
 
-        if attn is None:
-            raise RuntimeError("Fusion encoder did not return attention maps.")
+        # 3) Derive a single fused text vector per sample.
+        #    You can choose:
+        #    - last token: fused_txt[:, -1, :]
+        #    - mean over tokens: fused_txt.mean(dim=1)
+        #    Here I'll use last token (as before).
+        fused_vec = fused_txt[:, -1, :]                  # [B, D]
+        fused_vec = fused_vec / (fused_vec.norm(dim=-1, keepdim=True) + 1e-8)
 
-        B2, n_heads, L, P = attn.shape
+        # 4) Normalize image patch tokens
+        img_tokens = img_tokens / (img_tokens.norm(dim=-1, keepdim=True) + 1e-8)
+
+        # 5) Cosine similarity per patch: [B, P]
+        sim = torch.einsum("bd,bpd->bp", fused_vec, img_tokens)
+
+        # 6) reshape to spatial map
+        B2, P = sim.shape
         assert B2 == B
-
-        # For now: use attention from the LAST token (or choose something smarter later)
-        token_idx = L - 1
-        attn_token = attn[:, :, token_idx, :]      # [B, n_heads, P]
-        attn_mean = attn_token.mean(dim=1)         # [B, P]
-
-        # 3) reshape to spatial map
         H_p = W_p = int(P ** 0.5)
         assert H_p * W_p == P, f"cannot reshape P={P} into square grid"
-        heat = attn_mean.view(B, 1, H_p, W_p)      # [B, 1, H_p, W_p]
+        heat = sim.view(B, 1, H_p, W_p)
 
-        # 4) upsample to image resolution
+        # 7) upsample to image resolution
         heat = F.interpolate(heat, size=(H, W), mode="bicubic", align_corners=False)
 
-        # 5) normalize to [0,1]
-        heat = torch.relu(heat)
-        flat = heat.view(B, -1)
-        max_vals = flat.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-        heat = heat / max_vals.view(B, 1, 1, 1)
+        # 8) normalize to [0,1]
+        heat = heat - heat.amin(dim=(2, 3), keepdim=True)
+        denom = heat.amax(dim=(2, 3), keepdim=True).clamp(min=1e-6)
+        heat = heat / denom
 
         return heat  # [B, 1, H, W]
     
