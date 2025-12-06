@@ -231,6 +231,12 @@ class DinoTxtFusionBackend:
             flush=True,
         )
 
+        if B_txt > 1:
+            print(f"[HM_INSPECT] B_txt={B_txt}, texts:")
+            for t in texts:
+                print("   ", repr(t))
+            print("============================================", flush=True)
+
         # VERIFY: we expect this to sometimes FAIL
         assert B_img == B_txt, (
             f"Batch mismatch before fusion: "
