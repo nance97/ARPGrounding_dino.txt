@@ -276,7 +276,9 @@ class DinoTxtFusionBackend:
         assert B == B_txt and P_attn == P
 
         # 5) Choose which token to use (here: last token, like you already did)
-        attn_mean = attn.mean(dim=2).mean(dim=1)  # [B, P]
+        token_idx = L_attn - 1
+        attn_token = attn[:, :, token_idx, :]      # [B_txt, n_heads, P]
+        attn_mean  = attn_token.mean(dim=1)        # [B_txt, P]
 
         # 6) reshape to spatial map
         H_p = W_p = int(P ** 0.5)
