@@ -227,7 +227,7 @@ class DinoTxtFusionBackend:
 
         print(
             f"[DEBUG] B_img={B_img}, B_txt={B_txt}, "
-            f"P={P}, L={L}, len(texts)={len(texts)}, "
+            f"P={P}, L={L}, len(texts)={len(texts)}, ",
             flush=True,
         )
 
