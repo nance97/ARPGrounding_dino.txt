@@ -50,7 +50,11 @@ class MultiModalBlock(nn.Module):
 
         # 2) text->image cross-attention
         ca_out, attn = self.cross_attn(
-            query=x, key=img_tokens, value=img_tokens, need_weights=need_attn
+            query=x,
+            key=img_tokens,
+            value=img_tokens,
+            need_weights=need_attn,
+            average_attn_weights=False,  # <<--- ADD THIS
         )
         x = x + self.dropout(ca_out)
         x = self.norm2(x)
@@ -220,6 +224,8 @@ class DinoTxtFusionBackend:
 
         # 2) run fusion encoder, capturing last-layer cross-attn
         fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
+        print("attn_output shape inside fusion:", attn.shape)
+        print("img_tokens:", img_tokens.shape, "txt_tokens:", txt_tokens.shape)
         # attn: [B, n_heads, L, P]
 
         if attn is None:
