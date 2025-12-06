@@ -8,6 +8,7 @@ from dinov2.hub.dinotxt import (
 )
 from dinov2.data.transforms import make_classification_eval_transform
 
+
 class MultiModalBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int = 8, dim_ff: int | None = None, dropout: float = 0.1):
         super().__init__()
@@ -50,11 +51,7 @@ class MultiModalBlock(nn.Module):
 
         # 2) text->image cross-attention
         ca_out, attn = self.cross_attn(
-            query=x,
-            key=img_tokens,
-            value=img_tokens,
-            need_weights=need_attn,
-            average_attn_weights=False,  # <<--- ADD THIS
+            query=x, key=img_tokens, value=img_tokens, need_weights=need_attn
         )
         x = x + self.dropout(ca_out)
         x = self.norm2(x)
@@ -75,6 +72,8 @@ class MultiModalEncoder(nn.Module):
         )
         # ITM head if you later want to train with an image-text matching loss
         self.itm_head = nn.Linear(d_model, 2)
+        self.mlm_head = nn.Linear(d_model, d_model)  # predict original token features
+        self.mask_embed = nn.Parameter(torch.zeros(1, 1, d_model))
 
     def forward(self, txt_tokens, img_tokens, return_attn: bool = False):
         """
@@ -124,9 +123,8 @@ class DinoTxtFusionBackend:
         self.model.to(device)        # dino.txt frozen backbone
         self.fusion.to(device)       # multimodal fusion encoder
         return self
-    
+
     @torch.no_grad()
-    @torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
     def _get_visual_tokens(self, images: torch.Tensor) -> torch.Tensor:
         """
         images: [B, 3, H, W]
@@ -273,12 +271,6 @@ class DinoTxtFusionBackend:
 
         return heat  # [B_txt, 1, H, W]
     
-    def __call__(self, images, texts):
-        """
-        ARPGrounding expects __call__(images, texts) to return ONLY the heatmap.
-        """
-        return self.get_heatmaps(images, texts)
-
 
 def load_dinotxt_fusion_backend(
     device: str = "cuda",
