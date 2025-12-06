@@ -2,7 +2,7 @@ import numpy as np
 import torch.utils.data
 from tqdm import tqdm
 
-from arp_backends.dinotxt import load_dinotxt_backend
+from arp_backends.dinotxt import load_dinotxt_fusion_backend
 
 from datasets.flicker import get_flicker1K_dataset
 from datasets.referit import get_refit_test_dataset
