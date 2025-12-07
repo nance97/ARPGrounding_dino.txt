@@ -259,8 +259,8 @@ class DinoTxtFusionBackend:
         img_tokens = img_tokens.to(device=device)
         txt_tokens = txt_tokens.to(device=device)
 
-        img_tokens.requires_grad_(False)
-        txt_tokens.requires_grad_(False)
+        img_tokens.requires_grad_(True)
+        txt_tokens.requires_grad_(True)
 
         # ---- 2) Forward through fusion and capture last-layer cross-attn ----
         self.fusion.zero_grad(set_to_none=True)
