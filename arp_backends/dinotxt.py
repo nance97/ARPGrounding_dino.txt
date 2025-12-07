@@ -8,6 +8,7 @@ from dinov2.hub.dinotxt import (
 )
 from dinov2.data.transforms import make_classification_eval_transform
 
+
 class MultiModalBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int = 8, dim_ff: int | None = None, dropout: float = 0.1):
         super().__init__()
@@ -68,13 +69,23 @@ class MultiModalBlock(nn.Module):
 
 
 class MultiModalEncoder(nn.Module):
-    def __init__(self, d_model: int, n_heads: int = 8, num_layers: int = 4):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int = 8,
+        num_layers: int = 4,
+    ):
         super().__init__()
         self.layers = nn.ModuleList(
             [MultiModalBlock(d_model, n_heads) for _ in range(num_layers)]
         )
-        # ITM head if you later want to train with an image-text matching loss
+        # ITM head
         self.itm_head = nn.Linear(d_model, 2)
+
+        # --- NEW: MLM head and [MASK] embedding ---
+        self.mlm_head = nn.Linear(d_model, d_model)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        nn.init.normal_(self.mask_token, std=0.02)
 
     def forward(self, txt_tokens, img_tokens, return_attn: bool = False):
         """
