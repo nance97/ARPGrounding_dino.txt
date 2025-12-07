@@ -28,7 +28,7 @@ try:
 except Exception:
     pass
 
-FUSION_CKPT_DEFAULT = "/home/disi/dinotxt/dinotxt_fusion_itm_mlm_coco.pt"
+FUSION_CKPT_DEFAULT = "/home/disi/dinotxt/dinotxt_fusion_itm_coco.pt"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Description of your program")
@@ -85,6 +85,8 @@ if __name__ == "__main__":
         backend_name = "dinotxt"
         fusion_ckpt = FUSION_CKPT_DEFAULT
         dinotxt_backend = load_dinotxt_fusion_backend(device=device, fusion_ckpt=fusion_ckpt)
+
+        ds.transform = dinotxt_backend.preprocess
 
         print("Fusion ckpt loaded from:", fusion_ckpt)
         print("First layer weight norm:", dinotxt_backend.fusion.layers[0].self_attn.in_proj_weight.norm().item())
