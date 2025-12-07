@@ -221,59 +221,95 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    @torch.no_grad()
-    def get_heatmaps(backend, images, texts, token_index=None):
+    def get_heatmaps(self, images: torch.Tensor, texts: list[str]) -> torch.Tensor:
         """
-        Uses cross-attention from the last multimodal block.
-        Returns per-text heatmaps [B_txt, 1, H, W].
+        Grad-CAM heatmaps based on gradients w.r.t. image patch tokens
+        using the ITM 'match' logit as the target.
+
+        images: [B_img, 3, H, W]
+        texts:  list[str] of length B_txt
+
+        returns:
+            heatmaps: [B_txt, 1, H, W] in [0, 1]
         """
+        device = self.device
+        self.model.eval()
+        self.fusion.eval()  # eval: no dropout, but gradients still flow
 
-        device = backend.device
-        backend.model.eval()
-        backend.fusion.eval()
+        # ---- 1) Get frozen image/text tokens (no grad) ----
+        B_img_in, _, H, W = images.shape
 
-        B_img, _, H, W = images.shape
-
-        # 1) Get frozen tokens
-        img_tokens = backend._get_visual_tokens(images)          # [B_img, P, D]
-        txt_tokens = backend._get_text_token_batch(texts)        # [B_txt, L, D]
+        with torch.no_grad():
+            img_tokens = self._get_visual_tokens(images)       # [B_img, P, D]
+            txt_tokens = self._get_text_token_batch(texts)     # [B_txt, L, D]
 
         B_img, P, D = img_tokens.shape
-        B_txt, L, _ = txt_tokens.shape
+        B_txt, L, D2 = txt_tokens.shape
+        assert D == D2, f"D mismatch: img={D}, txt={D2}"
 
-        # Match batch size if needed
+        # ---- 2) Match batch sizes (1 image, many texts → tile image) ----
         if B_img == 1 and B_txt > 1:
             img_tokens = img_tokens.expand(B_txt, P, D)
+            B_img = B_txt
+        elif B_img != B_txt:
+            raise RuntimeError(
+                f"Batch mismatch: img_tokens={img_tokens.shape}, "
+                f"txt_tokens={txt_tokens.shape}, len(texts)={len(texts)}"
+            )
 
-        # 2) Forward with attention return
-        fused, attn = backend.fusion(
-            txt_tokens.to(device),
-            img_tokens.to(device),
-            return_attn=True
-        )
-        # attn: [B, heads, L, P]
+        # ---- 3) Prepare tokens for Grad-CAM ----
+        # Make img_tokens a leaf tensor with gradients enabled
+        img_tokens = img_tokens.to(device=device).detach()
+        img_tokens.requires_grad_(True)
 
-        # 3) Pick a token index
-        # If not provided → pick the text token with highest entropy or content words.
-        if token_index is None:
-            # crude but works: use the token with max attention variance
-            token_index = attn.var(dim=1).var(dim=-1).argmax(dim=-1)  # [B]
+        # Text tokens remain frozen (no grad needed)
+        txt_tokens = txt_tokens.to(device=device).detach()
 
-        heatmaps = []
-        for b in range(B_txt):
-            ti = token_index[b]
-            att = attn[b, :, ti, :]          # [heads, P]
-            att = att.mean(dim=0)            # avg over heads → [P]
+        # ---- 4) Forward through fusion, get ITM 'match' score ----
+        self.fusion.zero_grad(set_to_none=True)
 
-            # reshape to grid
-            H_p = W_p = int(P**0.5)
-            att = att.view(1, 1, H_p, W_p)
-            att = torch.nn.functional.interpolate(att, size=(H, W), mode="bicubic")
-            att = att.clamp(0, 1)
-            heatmaps.append(att)
+        # We don't actually need attention maps here
+        fused_txt, _ = self.fusion(txt_tokens, img_tokens, return_attn=False)
+        # fused_txt: [B_txt, 1+L, D]
 
-        return torch.cat(heatmaps, dim=0)
+        cls_repr = fused_txt[:, 0, :]                # [B_txt, D]
+        logits = self.fusion.itm_head(cls_repr)      # [B_txt, 2]
 
+        # class 1 = "matched" (same as your ITM labels)
+        score = (logits[:, 1] - logits[:, 0]).sum()
+
+        # Backprop to get gradients wrt img_tokens
+        score.backward(retain_graph=False)
+
+        grads = img_tokens.grad                      # [B_txt, P, D]
+        if grads is None:
+            raise RuntimeError("img_tokens.grad is None. Check requires_grad_ and graph.")
+
+        # ---- 5) Build patch-level CAM from grads ----
+        # Option A (simple & common): L2 norm of gradients over channels
+        # cam: [B_txt, P]
+        cam = grads.norm(dim=-1)
+
+        # (Optional alternative, a bit closer to Grad-CAM spirit:
+        # alpha = grads.mean(dim=-1, keepdim=True)       # [B_txt, P, 1]
+        # cam = (alpha * img_tokens).sum(dim=-1))        # [B_txt, P]
+
+        # ReLU + per-sample normalization
+        cam = F.relu(cam)
+        max_vals = cam.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
+        cam = cam / max_vals                         # [B_txt, P] in [0, 1]
+
+        # ---- 6) Reshape to spatial map and upsample ----
+        H_p = W_p = int(P ** 0.5)
+        assert H_p * W_p == P, f"cannot reshape P={P} into square grid"
+
+        heat = cam.view(B_txt, 1, H_p, W_p)          # [B_txt, 1, H_p, W_p]
+        heat = F.interpolate(heat, size=(H, W), mode="bicubic", align_corners=False)
+
+        # Final clamp to [0,1]
+        heat = heat.clamp(0.0, 1.0)
+
+        return heat
     
 
 def load_dinotxt_fusion_backend(
