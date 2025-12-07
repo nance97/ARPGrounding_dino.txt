@@ -211,32 +211,34 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    @torch.no_grad()
     def get_heatmaps(self, images: torch.Tensor, texts: list[str]) -> torch.Tensor:
         """
-        images: [B_img, 3, H, W]  (ARPG: B_img == 1)
-        texts:  list[str] of length B_txt (can be > 1 for multi-composition images)
+        Grad-CAM heatmaps based on CLS→patch cross-attention in the LAST
+        multimodal block, using the ITM 'match' logit as the target.
+
+        images: [B_img, 3, H, W]
+        texts:  list[str] of length B_txt
 
         returns:
-            heatmaps: [B_txt, 1, H, W]  (one heatmap per text)
+            heatmaps: [B_txt, 1, H, W] in [0, 1]
         """
-        # 1) Shapes
+        device = self.device
+        self.model.eval()
+        self.fusion.eval()
+
+        # ---- 1) Get frozen image/text tokens (no grad needed here) ----
         B_img_in, _, H, W = images.shape
 
-        # 2) Frozen tokens
-        img_tokens = self._get_visual_tokens(images)     # [B_img, P, D]
-        txt_tokens = self._get_text_token_batch(texts)   # [B_txt, L, D]
+        with torch.no_grad():
+            img_tokens = self._get_visual_tokens(images)       # [B_img, P, D]
+            txt_tokens = self._get_text_token_batch(texts)     # [B_txt, L, D]
 
-        B_img, P, D  = img_tokens.shape
+        B_img, P, D = img_tokens.shape
         B_txt, L, D2 = txt_tokens.shape
-        assert D == D2, f"D mismatch: img_tokens={D}, txt_tokens={D2}"
+        assert D == D2, f"D mismatch: img={D}, txt={D2}"
 
-        # Debug (optional)
-        # print(f"[DEBUG] B_img={B_img}, B_txt={B_txt}, P={P}, L={L}, len(texts)={len(texts)}")
-
-        # 3) Make batch sizes match: replicate image for each text
+        # Expand single image for multiple texts
         if B_img == 1 and B_txt > 1:
-            # expand: [1, P, D] -> [B_txt, P, D] (no new memory, just view)
             img_tokens = img_tokens.expand(B_txt, P, D)
             B_img = B_txt
         elif B_img != B_txt:
@@ -245,56 +247,63 @@ class DinoTxtFusionBackend:
                 f"txt_tokens={txt_tokens.shape}, len(texts)={len(texts)}"
             )
 
-        # 4) Run fusion encoder, ask for attention if you still want attn-based maps
+        # Detach to make them leaf tensors for this Grad-CAM graph
+        img_tokens = img_tokens.to(device=device)
+        txt_tokens = txt_tokens.to(device=device)
+
+        img_tokens.requires_grad_(False)
+        txt_tokens.requires_grad_(False)
+
+        # ---- 2) Forward through fusion and capture last-layer cross-attn ----
+        self.fusion.zero_grad(set_to_none=True)
+
         fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
-        # attn: [B, n_heads, L, P]
-
-        if not hasattr(self, "_debug_count"):
-            self._debug_count = 0
-
-        if self._debug_count < 20:
-            B, H, L_attn, P = attn.shape
-            token_idx = L_attn - 1
-            attn_token = attn[:, :, token_idx, :]  # [B, H, P]
-
-            # entropy per head over patches
-            probs = attn_token  # already softmaxed over P
-            entropy = -(probs * (probs.clamp_min(1e-8).log())).sum(dim=-1)  # [B, H]
-            print(f"[ATTN DEBUG] mean entropy over heads: {entropy.mean().item():.3f}, "
-                f"min: {entropy.min().item():.3f}, max: {entropy.max().item():.3f}")
-
-            # also check variance across patches
-            print(f"[ATTN DEBUG] per-head std over patches: {probs.std(dim=-1).mean().item():.5f}")
-            self._debug_count += 1
-
-        # attn: [B_txt, n_heads, L, P]
+        # fused_txt: [B_txt, 1+L, D]
+        # attn:      [B_txt, H, 1+L, P]
 
         if attn is None:
             raise RuntimeError("Fusion encoder did not return attention maps.")
 
-        B, n_heads, L_attn, P_attn = attn.shape
-        assert B == B_txt and P_attn == P
+        # We want gradients w.r.t. attn
+        attn.retain_grad()
 
-        # 5) Choose which token to use (here: last token, like you already did)
-        token_idx = L_attn - 1
-        attn_token = attn[:, :, token_idx, :]      # [B_txt, n_heads, P]
-        attn_mean  = attn_token.mean(dim=1)        # [B_txt, P]
+        # ---- 3) Compute ITM 'match' score from CLS and backprop ----
+        cls_repr = fused_txt[:, 0, :]                # [B_txt, D]
+        logits = self.fusion.itm_head(cls_repr)      # [B_txt, 2]
 
-        # 6) reshape to spatial map
+        # class 1 = "matched" (same as your ITM labels)
+        score = logits[:, 1].sum()                   # scalar
+        score.backward(retain_graph=False)
+
+        grads = attn.grad                            # [B_txt, H, 1+L, P]
+
+        # ---- 4) Grad-CAM on CLS → patch attention ----
+        # CLS token is at index 0 along the (1+L) axis
+        A_cls = attn[:, :, 0, :]                     # [B_txt, H, P]
+        G_cls = grads[:, :, 0, :]                    # [B_txt, H, P]
+
+        # Head weights α_h: average gradient over patches
+        alpha = G_cls.mean(dim=-1, keepdim=True)     # [B_txt, H, 1]
+
+        # Weighted sum over heads
+        cam = (alpha * A_cls).sum(dim=1)             # [B_txt, P]
+
+        # ReLU and per-sample normalization
+        cam = F.relu(cam)
+        max_vals = cam.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
+        cam = cam / max_vals                         # [B_txt, P] in [0,1]
+
+        # ---- 5) Reshape to spatial map and upsample ----
         H_p = W_p = int(P ** 0.5)
         assert H_p * W_p == P, f"cannot reshape P={P} into square grid"
-        heat = attn_mean.view(B_txt, 1, H_p, W_p)  # [B_txt, 1, H_p, W_p]
 
-        # 7) upsample to image resolution
+        heat = cam.view(B_txt, 1, H_p, W_p)          # [B_txt, 1, H_p, W_p]
         heat = F.interpolate(heat, size=(H, W), mode="bicubic", align_corners=False)
 
-        # 8) normalize to [0,1]
-        heat = torch.relu(heat)
-        flat = heat.view(B_txt, -1)
-        max_vals = flat.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-        heat = heat / max_vals.view(B_txt, 1, 1, 1)
+        # Final clamp to [0,1]
+        heat = heat.clamp(0.0, 1.0)
 
-        return heat  # [B_txt, 1, H, W]
+        return heat
     
 
 def load_dinotxt_fusion_backend(
