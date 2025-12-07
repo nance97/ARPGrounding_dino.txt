@@ -9,6 +9,11 @@ from dinov2.hub.dinotxt import (
 from dinov2.data.transforms import make_classification_eval_transform
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class MultiModalBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int = 8, dim_ff: int | None = None, dropout: float = 0.1):
         super().__init__()
@@ -25,7 +30,6 @@ class MultiModalBlock(nn.Module):
             embed_dim=d_model,
             num_heads=n_heads,
             batch_first=True,  # query [B, L, D], key/value [B, P, D]
-
         )
 
         self.ffn = nn.Sequential(
@@ -77,15 +81,17 @@ class MultiModalEncoder(nn.Module):
         )
         # ITM head if you later want to train with an image-text matching loss
         self.itm_head = nn.Linear(d_model, 2)
-        self.mlm_head = nn.Linear(d_model, d_model)  # predict original token features
-        self.mask_embed = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
 
     def forward(self, txt_tokens, img_tokens, return_attn: bool = False):
         """
         txt_tokens: [B, L, D]
         img_tokens: [B, P, D]
         """
-        x = txt_tokens
+        B, L, D = txt_tokens.shape
+        cls = self.cls_token.expand(B, 1, D)        # [B, 1, D]
+        x = torch.cat([cls, txt_tokens], dim=1)     # [B, 1+L, D]
+        
         last_attn = None
         for i, layer in enumerate(self.layers):
             need_attn = return_attn and (i == len(self.layers) - 1)
@@ -198,15 +204,17 @@ class DinoTxtFusionBackend:
         txt_tokens: torch.Tensor,   # [B, L, D]
     ) -> torch.Tensor:
         """
-        ITM forward given precomputed tokens (no string → token conversion).
-        Returns logits [B,2].
+        ITM forward given precomputed tokens.
+        Uses the fused CLS token as joint representation (ALBEF-style).
+        Returns logits [B, 2].
         """
         self.model.eval()
         self.fusion.train()
 
-        fused_txt, _ = self.fusion(txt_tokens, img_tokens, return_attn=False)  # [B, L, D]
-        pooled = fused_txt.mean(dim=1)  # [B, D]
-        logits = self.fusion.itm_head(pooled)  # [B, 2]
+        fused_txt, _ = self.fusion(txt_tokens, img_tokens, return_attn=False)  # [B, 1+L, D]
+
+        cls_repr = fused_txt[:, 0, :]             # [B, D]  <-- CLS
+        logits = self.fusion.itm_head(cls_repr)   # [B, 2]
         return logits
 
     # ---------- main API ----------
