@@ -222,7 +222,7 @@ class DinoTxtFusionBackend:
     # ---------- main API ----------
 
     @torch.no_grad()
-    def get_attn_heatmaps(backend, images, texts, token_index=None):
+    def get_heatmaps(backend, images, texts, token_index=None):
         """
         Uses cross-attention from the last multimodal block.
         Returns per-text heatmaps [B_txt, 1, H, W].
