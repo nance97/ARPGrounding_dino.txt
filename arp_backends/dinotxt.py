@@ -210,7 +210,7 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_attn_heatmaps(
+    def get_heatmaps(
             self,
             images: torch.Tensor,   # [B, 3, H, W]
             texts: list[str],       # len = B
