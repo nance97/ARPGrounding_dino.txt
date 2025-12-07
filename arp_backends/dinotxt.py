@@ -264,13 +264,15 @@ class DinoTxtFusionBackend:
 
         # ---- 2) Forward through fusion and capture last-layer cross-attn ----
         self.fusion.zero_grad(set_to_none=True)
-
         fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
         # fused_txt: [B_txt, 1+L, D]
         # attn:      [B_txt, H, 1+L, P]
 
         if attn is None:
             raise RuntimeError("Fusion encoder did not return attention maps.")
+        
+        if not isinstance(attn, torch.Tensor):
+            raise RuntimeError(f"Expected attn to be Tensor, got {type(attn)}")
 
         # We want gradients w.r.t. attn
         attn.retain_grad()
@@ -284,6 +286,9 @@ class DinoTxtFusionBackend:
         score.backward(retain_graph=False)
 
         grads = attn.grad                            # [B_txt, H, 1+L, P]
+
+        if grads is None:
+            print("[WARN] attn.grad is None, falling back to raw attention heatmaps.")
 
         # ---- 4) Grad-CAM on CLS → patch attention ----
         # CLS token is at index 0 along the (1+L) axis
