@@ -210,73 +210,76 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_heatmaps(
-        self,
-        images: torch.Tensor,   # [B, 3, H, W]
-        texts: list[str],       # len = B
-        use_cls: bool = True,
-        token_range: tuple[int, int] | None = None,
-    ) -> torch.Tensor:
+    def get_attn_heatmaps(
+            self,
+            images: torch.Tensor,   # [B, 3, H, W]
+            texts: list[str],       # len = B
+            use_cls: bool = True,
+            token_range: tuple[int, int] | None = None,
+        ) -> torch.Tensor:
         """
-        Cross-attention-based heatmaps (ALBEF-style-ish), *without* Grad-CAM.
+        Cross-attention-based heatmaps (ALBEF-ish), *without* Grad-CAM.
 
         images: [B, 3, H, W]
         texts:  list[str] of length B
-        use_cls: if True, use only CLS token attention (L index 0).
+        use_cls: if True, use only CLS token attention (L index 0)
         token_range: optional (start, end) to average over a span of tokens
-                     (e.g., phrase-level grounding). Indices in [0, L-1].
 
-        returns:
-            heatmaps: [B, 1, H, W] in [0, 1]
+        returns: heatmaps [B, 1, H, W] in [0, 1]
         """
         self.model.eval()
         self.fusion.eval()
 
-        B_img_in, _, H, W = images.shape
+        # ensure batched
+        if images.ndim == 3:
+            images = images.unsqueeze(0)
         images = images.to(self.device)
+        B, _, H, W = images.shape
 
-        # 1) Get tokens (no grad)
+        # 1) get tokens + cross-attn (no grad)
         with torch.no_grad():
             img_tokens = self._get_visual_tokens(images)       # [B, P, D]
             txt_tokens = self._get_text_token_batch(texts)     # [B, L, D]
 
-            # Forward with attention output
             _, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
             # attn: [B, n_heads, L, P]
 
-        B, n_heads, L, P = attn.shape
-        assert B == B_img_in
+        B_attn, n_heads, L, P = attn.shape
+        assert B_attn == B, f"batch mismatch: images={B}, attn={B_attn}"
 
-        # 2) Select which text positions to use
+        # 2) choose which text positions to use
         if use_cls:
-            # CLS-only attention
+            # CLS only
             # [B, n_heads, P]
             token_attn = attn[:, :, 0, :]
         elif token_range is not None:
             start, end = token_range
-            # average over [start, end) along L
-            # attn[:, :, start:end, :] -> [B, n_heads, L_sel, P]
+            # average over [start, end)
             token_attn = attn[:, :, start:end, :].mean(dim=2)  # [B, n_heads, P]
         else:
-            # default: average over all tokens (optionally skip CLS if you want)
+            # average over all L tokens
             token_attn = attn.mean(dim=2)  # [B, n_heads, P]
 
-        # 3) Average over heads
-        # [B, P]
+        # 3) average over heads → [B, P]
         patch_scores = token_attn.mean(dim=1)
 
-        # 4) Normalize per-sample to [0, 1]
+        # 4) normalize per-sample to [0, 1]
         patch_scores = patch_scores.clamp(min=0)
         max_vals = patch_scores.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
-        patch_scores = patch_scores / max_vals   # [B, P] in [0, 1]
+        patch_scores = patch_scores / max_vals  # [B, P]
 
-        # 5) Reshape to spatial grid and upsample to image size
+        # 5) reshape to spatial grid and upsample
         H_p = W_p = int(P ** 0.5)
-        assert H_p * W_p == P, f"cannot reshape P={P} to square, got P={P}"
+        if H_p * W_p != P:
+            raise RuntimeError(f"Cannot reshape P={P} into square grid (H_p={H_p}, W_p={W_p})")
 
-        heat = patch_scores.view(B, 1, H_p, W_p)           # [B, 1, H_p, W_p]
-        heat = F.interpolate(heat, size=(H, W),
-                             mode="bicubic", align_corners=False)
+        heat = patch_scores.view(B, 1, H_p, W_p)          # [B, 1, H_p, W_p]
+        heat = F.interpolate(
+            heat,
+            size=(H, W),
+            mode="bicubic",
+            align_corners=False,
+        )
         heat = heat.clamp(0.0, 1.0)
         return heat
     
