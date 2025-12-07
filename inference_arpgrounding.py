@@ -77,7 +77,7 @@ def save_heatmap_overlay(img_tensor, heatmap, out_path, inv_normalize=None, cmap
     plt.axis("off")
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.savefig(out_path, bbox_inches="tight", pad_inches=0)
+    plt.show()
     plt.close()
 
 if __name__ == "__main__":
