@@ -265,7 +265,7 @@ class DinoTxtFusionBackend:
         logits = self.fusion.itm_head(cls_repr)      # [B_txt, 2]
 
         # class 1 = "matched" (same as your ITM labels)
-        score = logits[:, 1].sum()                   # scalar
+        score = (logits[:, 1] - logits[:, 0]).sum()
 
         # Backprop to get gradients wrt img_tokens
         score.backward(retain_graph=False)

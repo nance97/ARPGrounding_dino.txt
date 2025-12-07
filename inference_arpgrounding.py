@@ -30,56 +30,6 @@ except Exception:
 
 FUSION_CKPT_DEFAULT = "/home/disi/dinotxt/dinotxt_fusion_itm_coco.pt"
 
-import matplotlib.pyplot as plt
-from torchvision import transforms
-import os
-
-def get_inv_normalize(preprocess):
-    """
-    Given dinotxt_backend.preprocess (a Compose), find its Normalize
-    and build an inverse transform to go back to [0,1] RGB.
-    """
-    mean, std = None, None
-    for t in getattr(preprocess, "transforms", []):
-        if isinstance(t, transforms.Normalize):
-            mean, std = t.mean, t.std
-            break
-    if mean is None:
-        # no normalization found; just return identity
-        return lambda x: x
-
-    inv_mean = [-m / s for m, s in zip(mean, std)]
-    inv_std = [1.0 / s for s in std]
-    inv_norm = transforms.Normalize(mean=inv_mean, std=inv_std)
-
-    def _inv(x):
-        return inv_norm(x)
-
-    return _inv
-
-
-def save_heatmap_overlay(img_tensor, heatmap, out_path, inv_normalize=None, cmap="jet", alpha=0.5):
-    """
-    img_tensor: [3, H, W] (preprocessed)
-    heatmap:    [H, W] in [0, 1]
-    """
-    img = img_tensor.clone().cpu()
-    if inv_normalize is not None:
-        img = inv_normalize(img)
-
-    img = img.clamp(0, 1)  # just in case
-    img_np = img.permute(1, 2, 0).numpy()  # [H, W, 3]
-    heat_np = heatmap.cpu().numpy()        # [H, W]
-
-    plt.figure(figsize=(4, 4))
-    plt.imshow(img_np)
-    plt.imshow(heat_np, cmap=cmap, alpha=alpha)
-    plt.axis("off")
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.show()
-    plt.close()
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Description of your program")
     parser.add_argument("-nW", "--nW", default=0, help="number of workers", required=False)
@@ -137,7 +87,6 @@ if __name__ == "__main__":
         dinotxt_backend = load_dinotxt_fusion_backend(device=device, fusion_ckpt=fusion_ckpt)
 
         ds.transform = dinotxt_backend.preprocess
-        inv_normalize = get_inv_normalize(dinotxt_backend.preprocess)
 
         print("Fusion ckpt loaded from:", fusion_ckpt)
         print("First layer weight norm:", dinotxt_backend.fusion.layers[0].self_attn.in_proj_weight.norm().item())
@@ -218,45 +167,6 @@ if __name__ == "__main__":
                 # images are already [B, 3, H, W] from the ARPG dataset
                 heatmaps = dinotxt_backend.get_heatmaps(real_imgs, texts).detach()
                 neg_heatmaps = dinotxt_backend.get_heatmaps(real_imgs, neg_texts).detach()
-
-                # --- DEBUG VISUALIZATION: only for first few samples ---
-                if i < 5:  # first 5 images
-                    out_dir_vis = Path("arp_vis") / f"sample_{i}"
-                    out_dir_vis.mkdir(parents=True, exist_ok=True)
-
-                    # assume batch_size=1 → real_imgs[0]
-                    img_t = real_imgs[0]             # [3, H, W]
-                    pos_hm = heatmaps[0, 0]          # [H, W] for first (positive) text
-                    neg_hm = neg_heatmaps[0, 0]      # [H, W] for first negative text
-
-                    # Save overlays
-                    save_heatmap_overlay(
-                        img_t, pos_hm,
-                        out_dir_vis / "pos_text_heatmap.png",
-                        inv_normalize=inv_normalize,
-                    )
-                    save_heatmap_overlay(
-                        img_t, neg_hm,
-                        out_dir_vis / "neg_text_heatmap.png",
-                        inv_normalize=inv_normalize,
-                    )
-
-                    # Also mark the pos/neg boxes for the first grounding pair
-                    if len(pos_bboxes) > 0:
-                        from PIL import Image, ImageDraw
-
-                        img_denorm = inv_normalize(img_t.clone().cpu()).clamp(0, 1)
-                        img_denorm = (img_denorm.permute(1, 2, 0).numpy() * 255).astype("uint8")
-                        pil_img = Image.fromarray(img_denorm)
-                        draw = ImageDraw.Draw(pil_img, "RGBA")
-
-                        px, py, px2, py2 = pos_bboxes[0]
-                        nx, ny, nx2, ny2 = neg_bboxes[0]
-                        draw.rectangle([px, py, px2, py2], outline=(0, 255, 0, 255), width=3)
-                        draw.rectangle([nx, ny, nx2, ny2], outline=(255, 0, 0, 255), width=3)
-
-                        pil_img.save(out_dir_vis / "bboxes.png")
-                # --- end debug visualization ---
 
             for j in range(0, len(heatmaps)):
                 pos_regions = [
