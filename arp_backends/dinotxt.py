@@ -221,8 +221,8 @@ class DinoTxtFusionBackend:
 
     def get_heatmaps(self, images: torch.Tensor, texts: list[str]) -> torch.Tensor:
         """
-        Grad-CAM heatmaps based on CLS→patch cross-attention in the LAST
-        multimodal block, using the ITM 'match' logit as the target.
+        Grad-CAM heatmaps based on gradients w.r.t. image patch tokens
+        using the ITM 'match' logit as the target.
 
         images: [B_img, 3, H, W]
         texts:  list[str] of length B_txt
@@ -232,9 +232,9 @@ class DinoTxtFusionBackend:
         """
         device = self.device
         self.model.eval()
-        self.fusion.eval()
+        self.fusion.eval()  # eval: no dropout, but gradients still flow
 
-        # ---- 1) Get frozen image/text tokens (no grad needed here) ----
+        # ---- 1) Get frozen image/text tokens (no grad) ----
         B_img_in, _, H, W = images.shape
 
         with torch.no_grad():
@@ -245,7 +245,7 @@ class DinoTxtFusionBackend:
         B_txt, L, D2 = txt_tokens.shape
         assert D == D2, f"D mismatch: img={D}, txt={D2}"
 
-        # Expand single image for multiple texts
+        # ---- 2) Match batch sizes (1 image, many texts → tile image) ----
         if B_img == 1 and B_txt > 1:
             img_tokens = img_tokens.expand(B_txt, P, D)
             B_img = B_txt
@@ -255,55 +255,49 @@ class DinoTxtFusionBackend:
                 f"txt_tokens={txt_tokens.shape}, len(texts)={len(texts)}"
             )
 
-        # Detach to make them leaf tensors for this Grad-CAM graph
-        img_tokens = img_tokens.to(device=device)
-        txt_tokens = txt_tokens.to(device=device)
-
+        # ---- 3) Prepare tokens for Grad-CAM ----
+        # Make img_tokens a leaf tensor with gradients enabled
+        img_tokens = img_tokens.to(device=device).detach()
         img_tokens.requires_grad_(True)
-        txt_tokens.requires_grad_(True)
 
-        # ---- 2) Forward through fusion and capture last-layer cross-attn ----
+        # Text tokens remain frozen (no grad needed)
+        txt_tokens = txt_tokens.to(device=device).detach()
+
+        # ---- 4) Forward through fusion, get ITM 'match' score ----
         self.fusion.zero_grad(set_to_none=True)
-        with torch.enable_grad():  # <-- key line
-            fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
-            # fused_txt: [B_txt, 1+L, D]
-            # attn:      [B_txt, H, 1+L, P]
-            if attn is None:
-                raise RuntimeError("Fusion encoder did not return attention maps.")
 
-            # We want gradients w.r.t. attn
-            attn.retain_grad()
+        # We don't actually need attention maps here
+        fused_txt, _ = self.fusion(txt_tokens, img_tokens, return_attn=False)
+        # fused_txt: [B_txt, 1+L, D]
 
-            # ---- 3) Compute ITM 'match' score from CLS and backprop ----
-            cls_repr = fused_txt[:, 0, :]                # [B_txt, D]
-            logits = self.fusion.itm_head(cls_repr)      # [B_txt, 2]
+        cls_repr = fused_txt[:, 0, :]                # [B_txt, D]
+        logits = self.fusion.itm_head(cls_repr)      # [B_txt, 2]
 
-            # class 1 = "matched" (same as your ITM labels)
-            score = logits[:, 1].sum()                   # scalar
+        # class 1 = "matched" (same as your ITM labels)
+        score = logits[:, 1].sum()                   # scalar
 
+        # Backprop to get gradients wrt img_tokens
         score.backward(retain_graph=False)
-        grads = attn.grad                            # [B_txt, H, 1+L, P]
 
+        grads = img_tokens.grad                      # [B_txt, P, D]
         if grads is None:
-            print("[WARN] attn.grad is None.")
+            raise RuntimeError("img_tokens.grad is None. Check requires_grad_ and graph.")
 
-        # ---- 4) Grad-CAM on CLS → patch attention ----
-        # CLS token is at index 0 along the (1+L) axis
-        A_cls = attn[:, :, 0, :]                     # [B_txt, H, P]
-        G_cls = grads[:, :, 0, :]                    # [B_txt, H, P]
+        # ---- 5) Build patch-level CAM from grads ----
+        # Option A (simple & common): L2 norm of gradients over channels
+        # cam: [B_txt, P]
+        cam = grads.norm(dim=-1)
 
-        # Head weights α_h: average gradient over patches
-        alpha = G_cls.mean(dim=-1, keepdim=True)     # [B_txt, H, 1]
+        # (Optional alternative, a bit closer to Grad-CAM spirit:
+        # alpha = grads.mean(dim=-1, keepdim=True)       # [B_txt, P, 1]
+        # cam = (alpha * img_tokens).sum(dim=-1))        # [B_txt, P]
 
-        # Weighted sum over heads
-        cam = (alpha * A_cls).sum(dim=1)             # [B_txt, P]
-
-        # ReLU and per-sample normalization
+        # ReLU + per-sample normalization
         cam = F.relu(cam)
         max_vals = cam.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
-        cam = cam / max_vals                         # [B_txt, P] in [0,1]
+        cam = cam / max_vals                         # [B_txt, P] in [0, 1]
 
-        # ---- 5) Reshape to spatial map and upsample ----
+        # ---- 6) Reshape to spatial map and upsample ----
         H_p = W_p = int(P ** 0.5)
         assert H_p * W_p == P, f"cannot reshape P={P} into square grid"
 
