@@ -7,6 +7,7 @@ from dinov2.hub.dinotxt import (
     get_tokenizer,
 )
 from dinov2.data.transforms import make_classification_eval_transform
+import math
 
 
 class DifferentiableMultiHeadAttention(nn.Module):
