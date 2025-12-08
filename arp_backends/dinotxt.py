@@ -284,74 +284,61 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_heatmaps(self, images: torch.Tensor, texts: list[str], token_strategy: str = "cls") -> torch.Tensor:
+    def get_heatmaps(self, images, texts, token_strategy="max", token_idx=None):
+        """
+        Pure attention-based heatmaps.
+
+        images: [B,3,H,W]
+        texts:  list[str]
+        token_strategy:
+            - "cls": use token 0
+            - "idx": use provided token_idx (int)
+            - "max": pick token with highest attention peak per sample
+
+        Returns: heatmaps [B, 1, H, W]
+        """
         device = self.device
         self.model.eval()
         self.fusion.eval()
 
-        B_img_in, _, H, W = images.shape
+        B_img, _, H, W = images.shape
 
         with torch.no_grad():
-            img_tokens = self._get_visual_tokens(images)
-            txt_tokens = self._get_text_token_batch(texts)
+            img_tokens = self._get_visual_tokens(images)       # [B, P, D]
+            txt_tokens = self._get_text_token_batch(texts)     # [B, L, D]
 
         img_tokens = img_tokens.to(device)
         txt_tokens = txt_tokens.to(device)
 
-        B_img, P, D = img_tokens.shape
-        B_txt, L, D2 = txt_tokens.shape
-        assert D == D2
+        B, P, D = img_tokens.shape
+        B_txt, L, _ = txt_tokens.shape
 
-        if B_img == 1 and B_txt > 1:
+        if B == 1 and B_txt > 1:
             img_tokens = img_tokens.expand(B_txt, P, D)
-            B_img = B_txt
-        elif B_img != B_txt:
-            raise RuntimeError("batch mismatch")
+            B = B_txt
 
-        # enable grad on tokens? not strictly needed for attn-grad, but okay:
-        img_tokens = img_tokens.detach()
-        txt_tokens = txt_tokens.detach()
+        _, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
+        # attn: [B, heads, L, P]
 
-        self.fusion.zero_grad(set_to_none=True)
-
-        fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
-        # attn: [B, H_heads, L, P]
-        if attn is None:
-            raise RuntimeError("no attention returned")
-
-        attn.retain_grad()
-
-        cls_repr = fused_txt[:, 0, :]
-        logits = self.fusion.itm_head(cls_repr)
-
-        score = (logits[:, 1] - logits[:, 0]).sum()
-        score.backward()
-
-        grads = attn.grad  # [B, H, L, P]
-        if grads is None:
-            raise RuntimeError("attn.grad is None")
-
-        # weights: avg grad over patches
-        weights = grads.mean(dim=-1, keepdim=True)   # [B, H, L, 1]
-        cam = (weights * attn).sum(dim=1)            # [B, L, P]
+        attn_mean = attn.mean(dim=1)  # [B, L, P]
 
         if token_strategy == "cls":
-            cam_token = cam[:, 0, :]
+            cam = attn_mean[:, 0, :]                  # [B, P]
+        elif token_strategy == "idx":
+            assert token_idx is not None
+            cam = attn_mean[:, token_idx, :]          # [B, P]
         elif token_strategy == "max":
-            norms = cam.norm(dim=-1)
-            idx = norms.argmax(dim=-1)               # [B]
-            cam_token = cam[torch.arange(B_txt, device=device), idx, :]
+            # pick the token with the highest maximum attention per sample
+            max_per_token, _ = attn_mean.max(dim=-1)  # [B, L]
+            best_idx = max_per_token.argmax(dim=-1)   # [B]
+            cam = attn_mean[torch.arange(B, device=device), best_idx, :]  # [B, P]
         else:
             raise ValueError(f"Unknown token_strategy={token_strategy}")
 
-        cam_token = F.relu(cam_token)
-        max_vals = cam_token.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
-        cam_token = cam_token / max_vals             # [B, P]
-
-        H_p = W_p = int(P ** 0.5)
-        heat = cam_token.view(B_txt, 1, H_p, W_p)
+        H_p = W_p = int(P**0.5)
+        heat = cam.view(B, 1, H_p, W_p)
         heat = F.interpolate(heat, size=(H, W), mode="bicubic", align_corners=False)
-        heat = heat.clamp(0.0, 1.0)
+        heat = heat.clamp(0, 1)
         return heat
 
 
