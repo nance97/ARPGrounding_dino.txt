@@ -221,96 +221,76 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_heatmaps(self, images: torch.Tensor, texts: list[str]) -> torch.Tensor:
-        """
-        Grad-CAM heatmaps based on gradients w.r.t. image patch tokens
-        using the ITM 'match' logit as the target.
-
-        images: [B_img, 3, H, W]
-        texts:  list[str] of length B_txt
-
-        returns:
-            heatmaps: [B_txt, 1, H, W] in [0, 1]
-        """
+    def get_heatmaps_albef(self, images: torch.Tensor, texts: list[str], token_strategy: str = "cls") -> torch.Tensor:
         device = self.device
         self.model.eval()
-        self.fusion.eval()  # eval: no dropout, but gradients still flow
+        self.fusion.eval()
 
-        # ---- 1) Get frozen image/text tokens (no grad) ----
         B_img_in, _, H, W = images.shape
 
         with torch.no_grad():
-            img_tokens = self._get_visual_tokens(images)       # [B_img, P, D]
-            txt_tokens = self._get_text_token_batch(texts)     # [B_txt, L, D]
+            img_tokens = self._get_visual_tokens(images)
+            txt_tokens = self._get_text_token_batch(texts)
+
+        img_tokens = img_tokens.to(device)
+        txt_tokens = txt_tokens.to(device)
 
         B_img, P, D = img_tokens.shape
         B_txt, L, D2 = txt_tokens.shape
-        assert D == D2, f"D mismatch: img={D}, txt={D2}"
+        assert D == D2
 
-        # ---- 2) Match batch sizes (1 image, many texts → tile image) ----
         if B_img == 1 and B_txt > 1:
             img_tokens = img_tokens.expand(B_txt, P, D)
             B_img = B_txt
         elif B_img != B_txt:
-            raise RuntimeError(
-                f"Batch mismatch: img_tokens={img_tokens.shape}, "
-                f"txt_tokens={txt_tokens.shape}, len(texts)={len(texts)}"
-            )
+            raise RuntimeError("batch mismatch")
 
-        # ---- 3) Prepare tokens for Grad-CAM ----
-        # Make img_tokens a leaf tensor with gradients enabled
-        img_tokens = img_tokens.to(device=device).detach()
-        img_tokens.requires_grad_(True)
+        # enable grad on tokens? not strictly needed for attn-grad, but okay:
+        img_tokens = img_tokens.detach()
+        txt_tokens = txt_tokens.detach()
 
-        # Text tokens remain frozen (no grad needed)
-        txt_tokens = txt_tokens.to(device=device).detach()
-
-        # ---- 4) Forward through fusion, get ITM 'match' score ----
         self.fusion.zero_grad(set_to_none=True)
 
-        # We don't actually need attention maps here
-        fused_txt, _ = self.fusion(txt_tokens, img_tokens, return_attn=False)
-        # fused_txt: [B_txt, 1+L, D]
+        fused_txt, attn = self.fusion(txt_tokens, img_tokens, return_attn=True)
+        # attn: [B, H_heads, L, P]
+        if attn is None:
+            raise RuntimeError("no attention returned")
 
-        cls_repr = fused_txt[:, 0, :]                # [B_txt, D]
-        logits = self.fusion.itm_head(cls_repr)      # [B_txt, 2]
+        attn.retain_grad()
 
-        # class 1 = "matched" (same as your ITM labels)
+        cls_repr = fused_txt[:, 0, :]
+        logits = self.fusion.itm_head(cls_repr)
+
         score = (logits[:, 1] - logits[:, 0]).sum()
+        score.backward()
 
-        # Backprop to get gradients wrt img_tokens
-        score.backward(retain_graph=False)
-
-        grads = img_tokens.grad                      # [B_txt, P, D]
+        grads = attn.grad  # [B, H, L, P]
         if grads is None:
-            raise RuntimeError("img_tokens.grad is None. Check requires_grad_ and graph.")
+            raise RuntimeError("attn.grad is None")
 
-        # ---- 5) Build patch-level CAM from grads ----
-        # Option A (simple & common): L2 norm of gradients over channels
-        # cam: [B_txt, P]
-        cam = grads.norm(dim=-1)
+        # weights: avg grad over patches
+        weights = grads.mean(dim=-1, keepdim=True)   # [B, H, L, 1]
+        cam = (weights * attn).sum(dim=1)            # [B, L, P]
 
-        # (Optional alternative, a bit closer to Grad-CAM spirit:
-        # alpha = grads.mean(dim=-1, keepdim=True)       # [B_txt, P, 1]
-        # cam = (alpha * img_tokens).sum(dim=-1))        # [B_txt, P]
+        if token_strategy == "cls":
+            cam_token = cam[:, 0, :]
+        elif token_strategy == "max":
+            norms = cam.norm(dim=-1)
+            idx = norms.argmax(dim=-1)               # [B]
+            cam_token = cam[torch.arange(B_txt, device=device), idx, :]
+        else:
+            raise ValueError(f"Unknown token_strategy={token_strategy}")
 
-        # ReLU + per-sample normalization
-        cam = F.relu(cam)
-        max_vals = cam.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
-        cam = cam / max_vals                         # [B_txt, P] in [0, 1]
+        cam_token = F.relu(cam_token)
+        max_vals = cam_token.max(dim=-1, keepdim=True).values.clamp(min=1e-6)
+        cam_token = cam_token / max_vals             # [B, P]
 
-        # ---- 6) Reshape to spatial map and upsample ----
         H_p = W_p = int(P ** 0.5)
-        assert H_p * W_p == P, f"cannot reshape P={P} into square grid"
-
-        heat = cam.view(B_txt, 1, H_p, W_p)          # [B_txt, 1, H_p, W_p]
+        heat = cam_token.view(B_txt, 1, H_p, W_p)
         heat = F.interpolate(heat, size=(H, W), mode="bicubic", align_corners=False)
-
-        # Final clamp to [0,1]
         heat = heat.clamp(0.0, 1.0)
-
         return heat
-    
+
 
 def load_dinotxt_fusion_backend(
     device: str = "cuda",
