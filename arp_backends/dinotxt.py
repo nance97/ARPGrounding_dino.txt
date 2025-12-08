@@ -284,7 +284,7 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_heatmaps(self, images, texts, token_strategy="max_valid", token_idx=None, pad_id: int = 0):
+    def get_heatmaps(self, images, texts, token_strategy="cls", token_idx=None, pad_id: int = 0):
         """
         Pure attention-based heatmaps with basic token masking.
 
