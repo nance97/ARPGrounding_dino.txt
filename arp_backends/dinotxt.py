@@ -221,7 +221,7 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_heatmaps_albef(self, images: torch.Tensor, texts: list[str], token_strategy: str = "cls") -> torch.Tensor:
+    def get_heatmaps(self, images: torch.Tensor, texts: list[str], token_strategy: str = "cls") -> torch.Tensor:
         device = self.device
         self.model.eval()
         self.fusion.eval()
