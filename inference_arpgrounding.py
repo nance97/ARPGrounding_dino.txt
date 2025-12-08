@@ -89,8 +89,6 @@ if __name__ == "__main__":
         ds.transform = dinotxt_backend.preprocess
 
         print("Fusion ckpt loaded from:", fusion_ckpt)
-        print("First layer weight norm:", dinotxt_backend.fusion.layers[0].self_attn.in_proj_weight.norm().item())
-        print("ITM head weight norm:", dinotxt_backend.fusion.itm_head.weight.norm().item())
 
 
     # Inference
