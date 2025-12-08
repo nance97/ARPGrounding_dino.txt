@@ -86,7 +86,7 @@ if __name__ == "__main__":
         fusion_ckpt = FUSION_CKPT_DEFAULT
         dinotxt_backend = load_dinotxt_fusion_backend(device=device, fusion_ckpt=fusion_ckpt)
 
-        ds.transform = dinotxt_backend.preprocess
+        # ds.transform = dinotxt_backend.preprocess
 
         print("Fusion ckpt loaded from:", fusion_ckpt)
 
