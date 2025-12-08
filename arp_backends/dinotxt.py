@@ -9,22 +9,84 @@ from dinov2.hub.dinotxt import (
 from dinov2.data.transforms import make_classification_eval_transform
 
 
+class DifferentiableMultiHeadAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.0, bias: bool = True):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+
+        # Projections
+        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.k_proj = nn.Linear(d_model, d_model, bias=bias)
+        self.v_proj = nn.Linear(d_model, d_model, bias=bias)
+
+        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
+
+        self.attn_dropout = nn.Dropout(dropout)
+        self.proj_dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        query: torch.Tensor,   # [B, L_q, D]
+        key: torch.Tensor,     # [B, L_k, D]
+        value: torch.Tensor,   # [B, L_k, D]
+        need_weights: bool = False,
+    ):
+        B, L_q, D = query.shape
+        Bk, L_k, Dk = key.shape
+        assert B == Bk and D == Dk == self.d_model
+
+        # Linear projections
+        Q = self.q_proj(query)   # [B, L_q, D]
+        K = self.k_proj(key)     # [B, L_k, D]
+        V = self.v_proj(value)   # [B, L_k, D]
+
+        # Reshape to [B, H, L, head_dim]
+        H = self.num_heads
+        Hd = self.head_dim
+
+        Q = Q.view(B, L_q, H, Hd).transpose(1, 2)  # [B, H, L_q, Hd]
+        K = K.view(B, L_k, H, Hd).transpose(1, 2)  # [B, H, L_k, Hd]
+        V = V.view(B, L_k, H, Hd).transpose(1, 2)  # [B, H, L_k, Hd]
+
+        # Scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(Hd)   # [B, H, L_q, L_k]
+        attn = F.softmax(scores, dim=-1)                               # [B, H, L_q, L_k]
+        attn = self.attn_dropout(attn)
+
+        context = torch.matmul(attn, V)                                # [B, H, L_q, Hd]
+
+        # Merge heads
+        context = context.transpose(1, 2).contiguous().view(B, L_q, D) # [B, L_q, D]
+        out = self.out_proj(context)
+        out = self.proj_dropout(out)
+
+        if need_weights:
+            # Return full attention (L_q x L_k) per head, in graph
+            return out, attn
+        else:
+            return out, None
+        
 class MultiModalBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int = 8, dim_ff: int | None = None, dropout: float = 0.1):
         super().__init__()
         if dim_ff is None:
             dim_ff = 4 * d_model
 
-        self.self_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
+        # Self-attention over text tokens
+        self.self_attn = DifferentiableMultiHeadAttention(
+            d_model=d_model,
             num_heads=n_heads,
-            batch_first=True,  # [B, L, D]
+            dropout=dropout,
         )
 
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
+        # Cross-attention: text queries, image keys/values
+        self.cross_attn = DifferentiableMultiHeadAttention(
+            d_model=d_model,
             num_heads=n_heads,
-            batch_first=True,  # query [B, L, D], key/value [B, P, D]
+            dropout=dropout,
         )
 
         self.ffn = nn.Sequential(
@@ -41,7 +103,7 @@ class MultiModalBlock(nn.Module):
     def forward(self, txt_tokens, img_tokens, need_attn: bool = False):
         """
         txt_tokens: [B, L, D]
-        img_tokens: [B, P, D] (frozen memory)
+        img_tokens: [B, P, D]
         """
         # 1) text self-attention
         x = txt_tokens
@@ -54,8 +116,7 @@ class MultiModalBlock(nn.Module):
             query=x,
             key=img_tokens,
             value=img_tokens,
-            need_weights=need_attn,
-            average_attn_weights=False,  # <<--- ADD THIS
+            need_weights=need_attn,  # attn will now be in the graph
         )
         x = x + self.dropout(ca_out)
         x = self.norm2(x)
@@ -86,6 +147,8 @@ class MultiModalEncoder(nn.Module):
         self.mlm_head = nn.Linear(d_model, d_model)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
         nn.init.normal_(self.mask_token, std=0.02)
+        with torch.no_grad():
+            self.mask_token[:] = self.mask_token / (self.mask_token.norm(dim=-1, keepdim=True) + 1e-8)
 
     def forward(self, txt_tokens, img_tokens, return_attn: bool = False):
         """
@@ -101,8 +164,7 @@ class MultiModalEncoder(nn.Module):
             if attn is not None:
                 last_attn = attn  # [B, n_heads, L, P]
         return x, last_attn
-
-
+    
 class DinoTxtFusionBackend:
     def __init__(self, device: str | None = None, last_k: int = 1,
                  n_heads: int = 8, num_layers: int = 4):
