@@ -162,8 +162,8 @@ if __name__ == "__main__":
 
             elif args["dinotxt_eval"]:
                 # images are already [B, 3, H, W] from the ARPG dataset
-                heatmaps = dinotxt_backend.get_heatmaps(real_imgs, texts).detach()
-                neg_heatmaps = dinotxt_backend.get_heatmaps(real_imgs, neg_texts).detach()
+                heatmaps = dinotxt_backend.get_heatmaps(real_imgs, texts, token_strategy="cls").detach()
+                neg_heatmaps = dinotxt_backend.get_heatmaps(real_imgs, neg_texts, token_strategy="cls").detach()
 
             for j in range(0, len(heatmaps)):
                 pos_regions = [
