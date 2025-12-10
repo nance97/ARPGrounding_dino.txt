@@ -71,10 +71,8 @@ class DifferentiableMultiHeadAttention(nn.Module):
             return out, None
         
 class MultiModalBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int = 8, dim_ff: int | None = None, dropout: float = 0.1):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__()
-        if dim_ff is None:
-            dim_ff = 4 * d_model
 
         # Self-attention over text tokens
         self.self_attn = DifferentiableMultiHeadAttention(
@@ -90,82 +88,65 @@ class MultiModalBlock(nn.Module):
             dropout=dropout,
         )
 
+        # Feedforward network
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, dim_ff),
+            nn.Linear(d_model, 4 * d_model),
             nn.GELU(),
-            nn.Linear(dim_ff, d_model),
+            nn.Linear(4 * d_model, d_model),
         )
 
+        # Layer norms + dropout
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, txt_tokens, img_tokens, need_attn: bool = False):
-        """
-        txt_tokens: [B, L, D]
-        img_tokens: [B, P, D]
-        """
-        # 1) text self-attention
-        x = txt_tokens
-        sa_out, _ = self.self_attn(x, x, x, need_weights=False)
-        x = x + self.dropout(sa_out)
-        x = self.norm1(x)
+    def forward(self, txt, img, need_attn=False):
+        # 1) Text self-attention
+        sa, _ = self.self_attn(txt, txt, txt)
+        x = self.norm1(txt + self.dropout(sa))
 
-        # 2) text->image cross-attention
-        ca_out, attn = self.cross_attn(
-            query=x,
-            key=img_tokens,
-            value=img_tokens,
-            need_weights=need_attn,  # attn will now be in the graph
-        )
-        x = x + self.dropout(ca_out)
-        x = self.norm2(x)
+        # 2) Cross-attention (text queries image patches)
+        ca, attn = self.cross_attn(x, img, img, need_weights=need_attn)
+        x = self.norm2(x + self.dropout(ca))
 
-        # 3) feed-forward
-        ff_out = self.ffn(x)
-        x = x + self.dropout(ff_out)
-        x = self.norm3(x)
+        # 3) Feedforward
+        ff = self.ffn(x)
+        x = self.norm3(x + self.dropout(ff))
 
-        return (x, attn) if need_attn else (x, None)
+        return x, attn
 
 
 class MultiModalEncoder(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int = 8,
-        num_layers: int = 4,
-    ):
+    def __init__(self, d_model: int, n_heads: int = 8, num_layers: int = 4):
         super().__init__()
-        self.layers = nn.ModuleList(
-            [MultiModalBlock(d_model, n_heads) for _ in range(num_layers)]
-        )
-        # ITM head
-        self.itm_head = nn.Linear(d_model, 2)
 
-        # --- NEW: MLM head and [MASK] embedding ---
+        self.layers = nn.ModuleList([
+            MultiModalBlock(d_model, n_heads)
+            for _ in range(num_layers)
+        ])
+
+        # Heads
+        self.itm_head = nn.Linear(d_model, 2)
         self.mlm_head = nn.Linear(d_model, d_model)
+
+        # Learnable mask embedding
         self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
         nn.init.normal_(self.mask_token, std=0.02)
-        with torch.no_grad():
-            self.mask_token[:] = self.mask_token / (self.mask_token.norm(dim=-1, keepdim=True) + 1e-8)
 
-    def forward(self, txt_tokens, img_tokens, return_attn: bool = False):
-        """
-        txt_tokens: [B, L, D]
-        img_tokens: [B, P, D]
-        """
-        x = txt_tokens  # no extra CLS
-        
+    def forward(self, txt_tokens, img_tokens, return_attn=False):
+        x = txt_tokens
         last_attn = None
+
         for i, layer in enumerate(self.layers):
-            need_attn = return_attn and (i == len(self.layers) - 1)
-            x, attn = layer(x, img_tokens, need_attn=need_attn)
+            need = return_attn and (i == len(self.layers) - 1)
+            x, attn = layer(x, img_tokens, need_attn=need)
             if attn is not None:
-                last_attn = attn  # [B, n_heads, L, P]
+                last_attn = attn
+
         return x, last_attn
-    
+
+
 class DinoTxtFusionBackend:
     def __init__(self, device: str | None = None, last_k: int = 1,
                  n_heads: int = 8, num_layers: int = 4):
@@ -284,7 +265,7 @@ class DinoTxtFusionBackend:
 
     # ---------- main API ----------
 
-    def get_heatmaps(self, images, texts, token_strategy="cls", token_idx=None, pad_id: int = 0):
+    def get_heatmaps(self, images, texts, token_strategy="max_valid", token_idx=None, pad_id: int = 0):
         """
         Pure attention-based heatmaps with basic token masking.
 
