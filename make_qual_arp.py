@@ -8,7 +8,7 @@ from datasets.arpgrounding import get_dataset
 from inference_grounding import interpret_clip
 import CLIP.clip as clip
 
-from arp_backends.dinotxt import load_dinotxt_fusion_backend
+from arp_backends.dinotxt import load_dinotxt_backend
 
 def tensor_to_vis(img_3hw: torch.Tensor):
     # img_3hw: float tensor, likely normalized; we just scale for display.
@@ -33,14 +33,14 @@ def normalize01(hm: torch.Tensor):
     m = hm.max().clamp(min=1e-6)
     return (hm / m)
 
-def extract_one(uid, split, out_path, device="cuda"):
+def extract_one(uid, split, out_path, val_path, device="cuda"):
     global_idx, local_idx = uid
 
     # ---------- dataset (same as their script) ----------
     args = {
         "nW": 0,
         "Isize": 304,   # doesn't matter much if we resize ourselves; keep consistent with their setup
-        "val_path": "../../wsg/MultiGrounding/data/visual_genome",
+        "val_path": val_path,
         "split": split,
     }
     ds = get_dataset(args)
@@ -50,7 +50,7 @@ def extract_one(uid, split, out_path, device="cuda"):
     # ---------- models ----------
     clip_model, _ = clip.load("ViT-B/32", device=device, jit=False)
 
-    dinotxt_backend = load_dinotxt_fusion_backend(device=device, fusion_ckpt=FUSION_CKPT_DEFAULT)
+    dinotxt_backend = load_dinotxt_backend(device=device)
     # IMPORTANT: do NOT set ds.transform = dinotxt_backend.preprocess here,
     # because we want to reuse the same fetched sample; we will resize the tensor ourselves.
 
@@ -109,8 +109,8 @@ def extract_one(uid, split, out_path, device="cuda"):
 
     # ---------- dino.txt heatmaps ----------
     # Your backend expects images already; it will upsample internally to input H,W (224 here).
-    hm_dino_pos = dinotxt_backend.get_heatmaps(img_224, [pos_text], token_strategy="cls")[0, 0]
-    hm_dino_neg = dinotxt_backend.get_heatmaps(img_224, [neg_text], token_strategy="cls")[0, 0]
+    hm_dino_pos = dinotxt_backend.get_heatmaps(img_224, [pos_text])[0, 0]
+    hm_dino_neg = dinotxt_backend.get_heatmaps(img_224, [neg_text])[0, 0]
     hm_dino_pos = normalize01(hm_dino_pos).detach().cpu().numpy()
     hm_dino_neg = normalize01(hm_dino_neg).detach().cpu().numpy()
 
